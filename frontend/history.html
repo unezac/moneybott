@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>History - Signal Engine</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet"/>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg-gradient: radial-gradient(circle at top left, #0d121c 0%, #030407 100%);
+  --surface: rgba(20, 25, 35, 0.4);
+  --border: rgba(255, 255, 255, 0.05);
+  --border-glow: rgba(0, 229, 255, 0.15);
+  --text: #e2e8f0;
+  --muted: #8ba0b8;
+  --accent: #00e5ff;
+  --accent-glow: 0 0 15px rgba(0, 229, 255, 0.4);
+  --bull: #00e676;
+  --bear: #ff3d5a;
+  --hold: #ffb300;
+  --font-sans: 'Outfit', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+body {
+  min-height: 100vh;
+  background: var(--bg-gradient);
+  color: var(--text);
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 0 0 40px 0;
+}
+
+body::before {
+  content:''; position:fixed; top:-50%; left:-20%; width:100%; height:100%;
+  background: radial-gradient(circle, rgba(0,229,255,0.03) 0%, transparent 60%);
+  pointer-events:none; z-index:-1;
+}
+
+/* ── top bar ── */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 32px; border-bottom: 1px solid var(--border);
+  background: rgba(10, 14, 20, 0.6); backdrop-filter: blur(20px);
+  position: sticky; top: 0; z-index: 100; width: 100%;
+}
+.logo { font-weight: 800; font-size: 18px; letter-spacing: 0.1em; color: #fff; text-transform: uppercase; }
+.logo span.highlight { color: var(--accent); text-shadow: var(--accent-glow); }
+
+.nav-links { display: flex; gap: 24px; margin-left: 32px; flex: 1; }
+.nav-links a { color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; transition: color 0.2s; }
+.nav-links a.active, .nav-links a:hover { color: var(--accent); }
+
+/* ── Table Card ── */
+.card {
+  background: var(--surface); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border); border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  padding: 30px; width: 100%; max-width: 900px;
+  margin-top: 60px;
+}
+
+.title { font-size: 18px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text); margin-bottom: 24px; }
+
+table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 13px; }
+th { text-align: left; padding: 16px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--muted); text-transform: uppercase; font-family: var(--font-sans); font-size: 12px; font-weight: 600; letter-spacing: 0.05em; }
+td { padding: 16px; border-bottom: 1px solid rgba(255,255,255,0.03); color: var(--text); }
+tr:hover td { background: rgba(255,255,255,0.02); }
+
+.badge { padding: 4px 8px; border-radius: 6px; font-weight: 700; font-family: var(--font-sans); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+.badge.buy { background: rgba(0,230,118,0.1); color: var(--bull); border: 1px solid rgba(0,230,118,0.3); box-shadow: 0 0 10px rgba(0,230,118,0.2); }
+.badge.sell { background: rgba(255,61,90,0.1); color: var(--bear); border: 1px solid rgba(255,61,90,0.3); box-shadow: 0 0 10px rgba(255,61,90,0.2); }
+.badge.hold { background: rgba(255,179,0,0.1); color: var(--hold); border: 1px solid rgba(255,179,0,0.3); box-shadow: 0 0 10px rgba(255,179,0,0.2); }
+
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo"><span class="highlight">ICT</span>/SMC Engine</div>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/history" class="active">History</a>
+    <a href="/settings">Settings</a>
+  </div>
+</div>
+
+<div class="card">
+  <div class="title">Execution History</div>
+  
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Timestamp (UTC)</th>
+        <th>Decision</th>
+        <th>Rationale</th>
+        <th>Win Prob</th>
+        <th>Pos Size</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="history-body">
+      <tr><td colspan="6" style="text-align:center;color:var(--muted)">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+async function loadHistory() {
+  const res = await fetch('/api/history?limit=50');
+  const data = await res.json();
+  const tbody = document.getElementById('history-body');
+  
+  if(data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No executions found in the database.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.map(r => {
+    let badgeClass = 'hold';
+    if(r.decision === 'Buy') badgeClass = 'buy';
+    if(r.decision === 'Sell') badgeClass = 'sell';
+
+    return `
+      <tr>
+        <td style="color:var(--muted)">#${r.id.toString().padStart(3, '0')}</td>
+        <td>${r.timestamp.replace('T', ' ').substring(0, 19)}</td>
+        <td><span class="badge ${badgeClass}">${r.decision}</span></td>
+        <td style="font-size:11px; color:var(--muted); max-width:250px;">${r.rationale || '—'}</td>
+        <td>${(r.win_probability * 100).toFixed(1)}%</td>
+        <td>${r.position_size > 0 ? r.position_size.toFixed(2) : '—'}</td>
+        <td style="color:var(--muted)">${r.exec_status}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+loadHistory();
+</script>
+</body>
+</html>
