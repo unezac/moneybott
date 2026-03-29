@@ -11,7 +11,7 @@ Handles:
 """
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -164,7 +164,7 @@ def get_bars(
     canonical: str = "NAS100",
     timeframe: str = "1h",
     n_bars: int = 500,
-    settings: dict = None,
+    settings: Optional[dict[str, Any]] = None,
     mt5_connected: bool = False,
 ) -> tuple[Optional[pd.DataFrame], Optional[str]]:
     """

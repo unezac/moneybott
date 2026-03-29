@@ -19,14 +19,22 @@ How it works:
 """
 
 import logging
-import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def _import_mt5_module() -> Any:
+    """Import MetaTrader5 dynamically and cast it to Any for typing support."""
+    try:
+        import MetaTrader5 as mt5  # type: ignore[import]
+        return cast(Any, mt5)
+    except Exception:
+        raise
 
 # ── Defaults (overridable via settings dict) ──────────────────────────────────
 DEFAULT_LOOKBACK       = 200   # bars of 1m data to analyse
@@ -62,8 +70,8 @@ YF_FALLBACKS: dict[str, list[str]] = {
 def _fetch_mt5_bars(symbol_mt5: str, n_bars: int = 200) -> Optional[pd.DataFrame]:
     """Pull 1-min OHLCV bars from the running MT5 terminal."""
     try:
-        import MetaTrader5 as mt5
-        rates = mt5.copy_rates_from_pos(symbol_mt5, mt5.TIMEFRAME_M1, 0, n_bars)
+        mt5 = _import_mt5_module()
+        rates: Any = mt5.copy_rates_from_pos(symbol_mt5, mt5.TIMEFRAME_M1, 0, n_bars)
         if rates is None or len(rates) == 0:
             return None
         df = pd.DataFrame(rates)
@@ -85,7 +93,7 @@ def _try_yf_download(yf_sym: str, interval: str, period: str, n_bars: int) -> Op
 
     def _dl():
         try:
-            import yfinance as yf
+            import yfinance as yf  # type: ignore[import]
             raw = yf.download(yf_sym, period=period, interval=interval,
                               progress=False, auto_adjust=True, timeout=15)
             if isinstance(raw.columns, pd.MultiIndex):
@@ -148,9 +156,14 @@ def get_live_bars(symbol_mt5: str, raw_ticker: str, n_bars: int = 200,
         timeframe="1m",
         n_bars=n_bars,
         mt5_connected=mt5_connected,
-    )
+    ))
     if df is not None and not df.empty:
         return df, resolved
+
+    # If mt5_data returns nothing, attempt a direct local MT5 fetch.
+    df = _fetch_mt5_bars(symbol_mt5, n_bars)
+    if df is not None and not df.empty:
+        return df, symbol_mt5
 
     # Fallback: yfinance chain
     logger.info("MT5 data unavailable — trying yfinance for %s…", symbol_mt5)
@@ -177,11 +190,11 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return tr.rolling(period).mean()
 
 
-def detect_fvg(df: pd.DataFrame, i: int) -> Optional[dict]:
+def detect_fvg(df: pd.DataFrame, i: int) -> Optional[dict[str, Any]]:
     """Check if a 3-bar Fair Value Gap exists ending at bar i."""
     if i < 2:
         return None
-    a, b, c = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
+    a, _, c = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
     # Bullish FVG: gap between candle[i-2].high and candle[i].low
     if c["Low"] > a["High"]:
         return {"type": "bull", "gap_lo": float(a["High"]), "gap_hi": float(c["Low"])}
@@ -191,7 +204,7 @@ def detect_fvg(df: pd.DataFrame, i: int) -> Optional[dict]:
     return None
 
 
-def detect_order_block(df: pd.DataFrame, i: int, lookback: int = 10) -> Optional[dict]:
+def detect_order_block(df: pd.DataFrame, i: int, lookback: int = 10) -> Optional[dict[str, Any]]:
     """Find the most recent opposite-colour candle before a strong move."""
     if i < lookback + 1:
         return None
@@ -203,12 +216,12 @@ def detect_order_block(df: pd.DataFrame, i: int, lookback: int = 10) -> Optional
         is_bull_bar   = bar["Close"] > bar["Open"]
         is_bear_move  = nxt["Close"] < nxt["Open"] and abs(nxt["Close"]-nxt["Open"]) > abs(bar["Close"]-bar["Open"])
         if is_bull_bar and is_bear_move:
-            return {"type": "bear_ob", "hi": float(bar["High"]), "lo": float(bar["Low"])}
+            return {"type": "bearish_ob", "hi": float(bar["High"]), "lo": float(bar["Low"])}
         # Bullish OB
         is_bear_bar  = bar["Close"] < bar["Open"]
         is_bull_move = nxt["Close"] > nxt["Open"] and abs(nxt["Close"]-nxt["Open"]) > abs(bar["Close"]-bar["Open"])
         if is_bear_bar and is_bull_move:
-            return {"type": "bull_ob", "hi": float(bar["High"]), "lo": float(bar["Low"])}
+            return {"type": "bullish_ob", "hi": float(bar["High"]), "lo": float(bar["Low"])}
     return None
 
 
@@ -217,15 +230,15 @@ def detect_mss(df: pd.DataFrame, i: int, lookback: int = 10) -> Optional[str]:
     if i < lookback + 2:
         return None
     window = df.iloc[max(0, i-lookback): i+1]
-    highs  = window["High"].values
-    lows   = window["Low"].values
+    highs  = window["High"].to_numpy()
+    lows   = window["Low"].to_numpy()
     # Bearish MSS: broke below a previous swing low
     prev_lows  = lows[:-3]
-    if len(prev_lows) and lows[-1] < prev_lows.min():
+    if prev_lows.size and lows[-1] < np.min(prev_lows):
         return "bear_mss"
     # Bullish MSS: broke above a previous swing high
     prev_highs = highs[:-3]
-    if len(prev_highs) and highs[-1] > prev_highs.max():
+    if prev_highs.size and highs[-1] > np.max(prev_highs):
         return "bull_mss"
     return None
 
@@ -247,11 +260,245 @@ def detect_sweep(df: pd.DataFrame, i: int, lookback: int = 10) -> Optional[str]:
     return None
 
 
+def is_in_ict_killzone(now_utc: Optional[datetime] = None) -> bool:
+    """Only allow trades during ICT high-probability killzones.
+
+    London: 07:00-10:00 UTC
+    New York: 12:00-15:00 UTC
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    hour = now_utc.hour
+    return (7 <= hour < 10) or (12 <= hour < 15)
+
+
+def detect_sweep_details(df: pd.DataFrame, i: int, lookback: int = 10) -> Optional[dict[str, Any]]:
+    """Return enriched liquidity sweep details for bar i."""
+    sweep_type = detect_sweep(df, i, lookback)
+    if sweep_type is None:
+        return None
+
+    highs = df["High"].values
+    lows = df["Low"].values
+    prev_high = float(max(highs[max(0, i - lookback):i]))
+    prev_low = float(min(lows[max(0, i - lookback):i]))
+
+    return {
+        "index":       i,
+        "type":        sweep_type,
+        "swept_level": prev_low if sweep_type == "sell_side_sweep" else prev_high,
+        "bar_high":    float(highs[i]),
+        "bar_low":     float(lows[i]),
+        "time":        str(df.iloc[i].get("time", i)),
+    }
+
+
+def get_recent_sweep(df: pd.DataFrame, until_index: int, lookback: int = 12) -> Optional[dict[str, Any]]:
+    """Find the most recent liquidity sweep before `until_index`."""
+    start = max(0, until_index - lookback)
+    last_sweep = None
+    for j in range(start, until_index):
+        sweep = detect_sweep_details(df, j, lookback)
+        if sweep is not None:
+            last_sweep = sweep
+    return last_sweep
+
+
+def find_mss_after_sweep(df: pd.DataFrame, sweep_index: int, desired_mss: str, lookforward: int = 12) -> Optional[dict[str, Any]]:
+    """Locate a matching MSS event after a valid liquidity sweep."""
+    for j in range(sweep_index + 1, min(len(df), sweep_index + lookforward + 1)):
+        mss = detect_mss(df, j)
+        if mss == desired_mss:
+            return {
+                "index": j,
+                "type":  mss,
+                "time":  str(df.iloc[j].get("time", j)),
+            }
+    return None
+
+
+def find_valid_entry_zone(df: pd.DataFrame, entry_index: int, direction: str, lookback: int = 15) -> Optional[dict[str, Any]]:
+    """Find a retracement entry into a valid OB or FVG for the strict ICT setup."""
+    current_price = float(df.iloc[entry_index]["Close"])
+    search_start = max(2, entry_index - lookback)
+
+    # Prefer Order Block entries if price is retesting the zone.
+    for j in range(search_start, entry_index):
+        ob = detect_order_block(df, j)
+        if ob is None:
+            continue
+        if direction == "Buy" and ob["type"] == "bullish_ob":
+            if ob["ob_low"] <= current_price <= ob["ob_high"]:
+                return {
+                    "type":          "bullish_ob",
+                    "hi":            ob["ob_high"],
+                    "lo":            ob["ob_low"],
+                    "origin_index":  j,
+                    "time":          str(df.iloc[j].get("time", j)),
+                }
+        if direction == "Sell" and ob["type"] == "bearish_ob":
+            if ob["ob_low"] <= current_price <= ob["ob_high"]:
+                return {
+                    "type":          "bearish_ob",
+                    "hi":            ob["ob_high"],
+                    "lo":            ob["ob_low"],
+                    "origin_index":  j,
+                    "time":          str(df.iloc[j].get("time", j)),
+                }
+
+    # Fallback to a fresh Fair Value Gap retracement.
+    for j in range(search_start, entry_index):
+        fvg = detect_fvg(df, j)
+        if fvg is None:
+            continue
+        if direction == "Buy" and fvg["type"] == "bull" and fvg["gap_lo"] <= current_price <= fvg["gap_hi"]:
+            return {
+                "type":          "fvg_bull",
+                "lower":         fvg["gap_lo"],
+                "upper":         fvg["gap_hi"],
+                "origin_index":  j,
+                "time":          str(df.iloc[j].get("time", j)),
+            }
+        if direction == "Sell" and fvg["type"] == "bear" and fvg["gap_lo"] <= current_price <= fvg["gap_hi"]:
+            return {
+                "type":          "fvg_bear",
+                "lower":         fvg["gap_lo"],
+                "upper":         fvg["gap_hi"],
+                "origin_index":  j,
+                "time":          str(df.iloc[j].get("time", j)),
+            }
+
+    return None
+
+
+def find_opposing_liquidity_pool(df: pd.DataFrame, entry_index: int, direction: str, lookback: int = 30) -> Optional[float]:
+    """Estimate the next opposing liquidity pool for target selection."""
+    entry_price = float(df.iloc[entry_index]["Close"])
+    start = max(0, entry_index - lookback)
+
+    if direction == "Buy":
+        candidates = [float(h) for h in df["High"].iloc[start:entry_index] if float(h) > entry_price]
+        return max(candidates) if candidates else None
+
+    candidates = [float(l) for l in df["Low"].iloc[start:entry_index] if float(l) < entry_price]
+    return min(candidates) if candidates else None
+
+
+def calculate_ict_sl_tp(
+    entry_price: float,
+    direction: str,
+    zone: dict[str, Any],
+    atr: float,
+    rr_ratio: float = 2.0,
+    df: Optional[pd.DataFrame] = None,
+    entry_index: int = 0,
+) -> Optional[dict[str, Any]]:
+    """Calculate ICT stop and target using the validated OB/FVG entry zone."""
+    if atr <= 0:
+        atr = 0.5 * abs(zone.get("upper", zone.get("hi", entry_price)) - zone.get("lower", zone.get("lo", entry_price)))
+    buffer = max(atr * 0.25, abs(zone.get("upper", zone.get("hi", entry_price)) - zone.get("lower", zone.get("lo", entry_price))) * 0.15, 0.0001)
+
+    if zone["type"] in ("bullish_ob", "bearish_ob"):
+        if direction == "Buy":
+            sl = zone["lo"] - buffer
+        else:
+            sl = zone["hi"] + buffer
+    elif zone["type"] == "fvg_bull":
+        sl = zone["lower"] - buffer if direction == "Buy" else zone["upper"] + buffer
+    elif zone["type"] == "fvg_bear":
+        sl = zone["upper"] + buffer if direction == "Sell" else zone["lower"] - buffer
+    else:
+        return None
+
+    if direction == "Buy" and sl >= entry_price:
+        sl = entry_price - abs(buffer)
+    if direction == "Sell" and sl <= entry_price:
+        sl = entry_price + abs(buffer)
+
+    sl_distance = abs(entry_price - sl)
+    if sl_distance <= 0:
+        return None
+
+    pool = None
+    if df is not None:
+        pool = find_opposing_liquidity_pool(df, entry_index, direction)
+
+    if pool is not None:
+        if direction == "Buy" and pool > entry_price:
+            tp = pool if pool - entry_price >= rr_ratio * sl_distance else entry_price + rr_ratio * sl_distance
+        elif direction == "Sell" and pool < entry_price:
+            tp = pool if entry_price - pool >= rr_ratio * sl_distance else entry_price - rr_ratio * sl_distance
+        else:
+            tp = entry_price + rr_ratio * sl_distance if direction == "Buy" else entry_price - rr_ratio * sl_distance
+    else:
+        tp = entry_price + rr_ratio * sl_distance if direction == "Buy" else entry_price - rr_ratio * sl_distance
+
+    rr_actual = abs(tp - entry_price) / sl_distance
+    if rr_actual < 2.0:
+        return None
+
+    return {
+        "sl":   round(sl, 5),
+        "tp":   round(tp, 5),
+        "rr":   round(rr_actual, 2),
+        "size": rr_ratio,
+    }
+
+
+def build_strict_ict_setup(
+    df: pd.DataFrame,
+    i: int,
+    atr: pd.Series,
+    rr_ratio: float = 2.0,
+    sweep_lookback: int = 12,
+    mss_forward: int = 12,
+    zone_lookback: int = 15,
+) -> Optional[dict[str, Any]]:
+    """Build a strict ICT setup at bar i if the sequence is valid."""
+    if i < 10:
+        return None
+
+    sweep = get_recent_sweep(df, i, lookback=sweep_lookback)
+    if sweep is None:
+        return None
+
+    desired_mss = "bear_mss" if sweep["type"] == "buy_side_sweep" else "bull_mss"
+    mss = find_mss_after_sweep(df, sweep["index"], desired_mss, lookforward=mss_forward)
+    if mss is None:
+        return None
+
+    direction = "Buy" if mss["type"] == "bull_mss" else "Sell"
+    entry_zone = find_valid_entry_zone(df, i, direction, lookback=zone_lookback)
+    if entry_zone is None:
+        return None
+
+    entry_price = float(df.iloc[i]["Close"])
+    stop_target = calculate_ict_sl_tp(entry_price, direction, entry_zone, float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else 0.0,
+                                     rr_ratio=rr_ratio, df=df, entry_index=i)
+    if stop_target is None:
+        return None
+
+    return {
+        "bar_index":    i,
+        "time":         str(df.iloc[i].get("time", i)),
+        "price":        round(entry_price, 5),
+        "direction":    direction,
+        "score":        3,
+        "confirmations": ["ICT_sweep", "ICT_mss", "ICT_entry"],
+        "atr":          round(float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else 0.0, 5),
+        "sweep":        sweep,
+        "mss":          mss,
+        "zone":         entry_zone,
+        "sl":           stop_target["sl"],
+        "tp":           stop_target["tp"],
+        "rr_ratio":     stop_target["rr"],
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIRMATION SCORER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def score_candle(df: pd.DataFrame, i: int, ema20: pd.Series, atr: pd.Series) -> dict:
+def score_candle(df: pd.DataFrame, i: int, ema20: pd.Series, atr: pd.Series) -> dict[str, Any]:
     """
     Score a single candle for scalp opportunity.
     Returns dict with confirmation list, total score, and direction.
@@ -261,9 +508,9 @@ def score_candle(df: pd.DataFrame, i: int, ema20: pd.Series, atr: pd.Series) -> 
     ema_v  = float(ema20.iloc[i])
     atr_v  = float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else 0.0
 
-    confirmations = []
-    bull_score = 0
-    bear_score = 0
+    confirmations: list[str] = []
+    bull_score: int = 0
+    bear_score: int = 0
 
     # ① EMA alignment
     if price > ema_v:
@@ -284,7 +531,7 @@ def score_candle(df: pd.DataFrame, i: int, ema20: pd.Series, atr: pd.Series) -> 
     # ③ Order Block
     ob = detect_order_block(df, i)
     if ob:
-        if ob["type"] == "bull_ob":
+        if ob["type"] == "bullish_ob":
             bull_score += 1; confirmations.append("OB_bull")
         else:
             bear_score += 1; confirmations.append("OB_bear")
@@ -332,7 +579,7 @@ def score_candle(df: pd.DataFrame, i: int, ema20: pd.Series, atr: pd.Series) -> 
 # TRADE SIZING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _normalize_lot(raw_size: float, sym_info) -> float:
+def _normalize_lot(raw_size: float, sym_info: Any = None) -> float:
     """
     Clamp and round a lot size to the broker's allowed lot step/min/max.
     sym_info is the mt5.symbol_info() object (or None for stub).
@@ -357,13 +604,15 @@ def size_scalp_trade(price: float, atr: float, direction: str,
                      sl_mult: float = DEFAULT_SL_MULT,
                      tp_mult: float = DEFAULT_TP_MULT,
                      rr_ratio: float = 2.0,
-                     sym_info=None) -> dict:
+                     sym_info: Any = None,
+                     custom_sl_distance: Optional[float] = None) -> dict[str, float]:
     """
-    Compute tight scalp SL/TP and lot size.
-    Uses monetary risk per pip: size_lots = risk_usd / (sl_distance_points × point_value)
+    Compute scalp lot size and optional SL/TP levels.
+    If custom_sl_distance is provided, it is used instead of ATR × sl_mult.
     """
-    sl_dist = atr * sl_mult
-    # TP is SL_distance multiplied by the Risk:Reward ratio
+    sl_dist = custom_sl_distance if custom_sl_distance is not None else atr * sl_mult
+    if sl_dist <= 0:
+        sl_dist = max(atr * sl_mult, 0.0001)
     tp_dist = sl_dist * rr_ratio
 
     # Point value from symbol info (e.g. NAS100: 1 lot = $1/pt typically)
@@ -392,7 +641,7 @@ def size_scalp_trade(price: float, atr: float, direction: str,
         "tp":            tp,
         "sl_distance":   round(sl_dist, 5),
         "tp_distance":   round(tp_dist, 5),
-        "rr_ratio":      round(tp_mult / sl_mult, 2),
+        "rr_ratio":      round(rr_ratio, 2),
     }
 
 
@@ -403,7 +652,7 @@ def size_scalp_trade(price: float, atr: float, direction: str,
 def _execute_single_scalp(symbol_mt5: str, direction: str, size: float,
                            sl: float, tp: float,
                            stub: bool = True, mt5_connected: bool = False,
-                           sym_info=None) -> dict:
+                           sym_info: Any = None) -> dict[str, Any]:
     """
     Execute a single scalp order.
     - Always fetches LIVE tick price from MT5 (avoids price deviation rejection).
@@ -418,7 +667,7 @@ def _execute_single_scalp(symbol_mt5: str, direction: str, size: float,
         }
 
     try:
-        import MetaTrader5 as mt5
+        mt5 = _import_mt5_module()
 
         # ── Real-time price from MT5  (NOT yfinance price) ──────────────────
         tick = mt5.symbol_info_tick(symbol_mt5)
@@ -444,6 +693,8 @@ def _execute_single_scalp(symbol_mt5: str, direction: str, size: float,
         size = _normalize_lot(size, sym_info)
 
         # ── Build and send order — try IOC first, then FOK ──────────────────
+        res: Any = None
+        req: dict[str, Any]
         for filling in [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
             req = {
                 "action":       mt5.TRADE_ACTION_DEAL,
@@ -489,9 +740,10 @@ def run_scalper(
     max_trades: int = DEFAULT_MAX_TRADES,
     lookback: int = DEFAULT_LOOKBACK,
     stub_mode: bool = True,
-    settings: dict = None,
+    settings: Optional[dict[str, Any]] = None,
     auto_trade_active: bool = False, # Pass auto-trade state
-) -> dict:
+    strict_ict: bool = True,
+) -> dict[str, Any]:
     """
     Full scalping session:
     1. Connect to MT5 if credentials available.
@@ -544,16 +796,39 @@ def run_scalper(
     ema20 = calc_ema(df["Close"], DEFAULT_EMA_FAST)
     atr   = calc_atr(df, DEFAULT_ATR_LEN)
 
+    # ── Risk sizing inputs used for strict setup building
+    try:
+        rr_ratio = float(settings.get("risk_reward_ratio", "2"))
+    except (ValueError, TypeError):
+        rr_ratio = 2.0
+
     # ── Scan setups (last 60 bars analysed — avoid stale signals) ───────────
     scan_start   = max(DEFAULT_ATR_LEN + 10, n - 60)
-    all_setups   = []
-    valid_setups = []
+    all_setups: list[dict[str, Any]]   = []
+    valid_setups: list[dict[str, Any]] = []
 
-    for i in range(scan_start, n):
-        scored = score_candle(df, i, ema20, atr)
-        all_setups.append(scored)
-        if scored["direction"] != "Hold" and scored["score"] >= min_confirmations:
-            valid_setups.append(scored)
+    if strict_ict and not is_in_ict_killzone():
+        logger.info("  ✗ Outside ICT killzone — strict ICT will not open trades.")
+    else:
+        for i in range(scan_start, n):
+            if strict_ict:
+                strict_setup = build_strict_ict_setup(
+                    df=df,
+                    i=i,
+                    atr=atr,
+                    rr_ratio=rr_ratio,
+                    sweep_lookback=12,
+                    mss_forward=12,
+                    zone_lookback=15,
+                )
+                if strict_setup is not None:
+                    all_setups.append(strict_setup)
+                    valid_setups.append(strict_setup)
+            else:
+                scored = score_candle(df, i, ema20, atr)
+                all_setups.append(scored)
+                if scored["direction"] != "Hold" and scored["score"] >= min_confirmations:
+                    valid_setups.append(scored)
 
     logger.info("  ✓  %d total setups scanned, %d valid (conf ≥ %d).",
                 len(all_setups), len(valid_setups), min_confirmations)
@@ -562,7 +837,7 @@ def run_scalper(
     sym_info = None
     if mt5_connected:
         try:
-            import MetaTrader5 as mt5
+            mt5 = _import_mt5_module()
             sym_info = mt5.symbol_info(symbol_mt5)
             if sym_info and not sym_info.visible:
                 mt5.symbol_select(symbol_mt5, True)
@@ -577,26 +852,33 @@ def run_scalper(
         rr_ratio = 2.0
 
     # ── Execute trades ──────────────────────────────────────────────────────
-    trades = []
+    trades: list[dict[str, Any]] = []
     for setup in valid_setups[:max_trades]:
+        custom_sl_distance = None
+        if strict_ict and setup.get("sl") is not None:
+            custom_sl_distance = abs(setup["price"] - setup["sl"])
+
         sizing = size_scalp_trade(
             price=setup["price"],
             atr=setup["atr"],
             direction=setup["direction"],
             rr_ratio=rr_ratio,
             sym_info=sym_info,
+            custom_sl_distance=custom_sl_distance,
         )
+        trade_sl = setup.get("sl", sizing["sl"])
+        trade_tp = setup.get("tp", sizing["tp"])
         receipt = _execute_single_scalp(
             symbol_mt5=exec_symbol,   # use resolved broker symbol
             direction=setup["direction"],
             size=sizing["size"],
-            sl=sizing["sl"],
-            tp=sizing["tp"],
+            sl=trade_sl,
+            tp=trade_tp,
             stub=effective_stub, # Use effective stub logic
             mt5_connected=mt5_connected,
             sym_info=sym_info,
         )
-        trade_record = {
+        trade_record: dict[str, Any] = {
             "time":          setup["time"],
             "price":         setup["price"],
             "direction":     setup["direction"],
@@ -626,7 +908,7 @@ def run_scalper(
     last_bar = df.iloc[-1]
     live_price = float(last_bar["Close"])
 
-    summary = {
+    summary: dict[str, Any] = {
         "bars_analysed":      n,
         "candles_scanned":    len(all_setups),
         "valid_setups_found": len(valid_setups),

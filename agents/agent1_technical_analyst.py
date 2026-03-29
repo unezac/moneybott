@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
-import yfinance as yf
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -90,6 +89,12 @@ def fetch_ohlcv(
         logger.warning("MT5 data unavailable for Agent 1: %s — trying yfinance.", exc)
 
     # ── 2. Fallback: yfinance with tight timeouts ───────────────────────────
+    try:
+        import yfinance as yf
+    except ImportError as exc:
+        logger.error("yfinance is not installed. Install it with: pip install yfinance")
+        raise RuntimeError("yfinance package missing") from exc
+
     for attempt in range(1, retries + 1):
         try:
             logger.info(

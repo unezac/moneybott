@@ -19,20 +19,25 @@ REQUIREMENTS:
 =============================================================================
 """
 
+import importlib
 import json
 import logging
 import os
 from datetime import datetime, timezone
+from typing import Any, Optional, cast
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+mt5: Any = cast(Any, None)
+mt5_available: bool = False
 try:
-    import MetaTrader5 as mt5
-    MT5_AVAILABLE = True
+    _mt5_module = importlib.import_module("MetaTrader5")
+    mt5 = cast(Any, _mt5_module)
+    mt5_available = True
 except ImportError:
     mt5 = None
-    MT5_AVAILABLE = False
+    mt5_available = False
     logger.warning("MetaTrader5 package not installed. Run: pip install MetaTrader5")
 
 
@@ -40,7 +45,8 @@ except ImportError:
 # MT5 CONNECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_mt5_credentials(settings: dict) -> tuple:
+def _get_mt5_credentials(settings: Optional[dict[str, Any]] = None) -> tuple[int, str, str]:
+    settings = settings or {}
     try:
         account = int(settings.get("mt5_account") or os.getenv("MT5_ACCOUNT", "0"))
     except (ValueError, TypeError):
@@ -50,8 +56,8 @@ def _get_mt5_credentials(settings: dict) -> tuple:
     return account, password, server
 
 
-def connect_mt5(settings: dict) -> bool:
-    if not MT5_AVAILABLE:
+def connect_mt5(settings: Optional[dict[str, Any]] = None) -> bool:
+    if not mt5_available:
         return False
 
     account, password, server = _get_mt5_credentials(settings)
@@ -76,7 +82,7 @@ def connect_mt5(settings: dict) -> bool:
 
 
 def disconnect_mt5():
-    if MT5_AVAILABLE:
+    if mt5_available:
         try:
             mt5.shutdown()
         except Exception:
@@ -115,7 +121,7 @@ def _resolve_mt5_symbol(ticker: str) -> str | None:
     return canonical
 
 
-def _normalize_lot(raw: float, sym_info) -> float:
+def _normalize_lot(raw: float, sym_info: Any) -> float:
     """Clamp and round a raw lot value to broker constraints."""
     if sym_info is None:
         return max(0.01, min(round(raw, 2), 100.0))
@@ -134,7 +140,7 @@ def _normalize_lot(raw: float, sym_info) -> float:
 # CORE EXECUTION FUNCTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def execute_trade(risk_payload: dict, stub_mode: bool = False, settings: dict = None) -> dict:
+def execute_trade(risk_payload: dict[str, Any], stub_mode: bool = False, settings: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """
     Main entry point for Agent 5.
 
@@ -152,7 +158,7 @@ def execute_trade(risk_payload: dict, stub_mode: bool = False, settings: dict = 
     exec_params = risk_payload.get("execution_parameters", {})
     gate_status = exec_params.get("status", "No Trade")
 
-    base = {
+    base: dict[str, Any] = {
         "agent":         "execution_runner",
         "timestamp_utc": datetime.now(tz=timezone.utc).isoformat(),
         "broker":        "MetaTrader5",
@@ -184,7 +190,7 @@ def execute_trade(risk_payload: dict, stub_mode: bool = False, settings: dict = 
                 "qty_lots":   round(qty_raw, 2)}
 
     # ── LIVE MT5 EXECUTION ─────────────────────────────────────────────────────
-    if not MT5_AVAILABLE:
+    if not mt5_available:
         logger.error("MetaTrader5 package not installed. Run: pip install MetaTrader5")
         return {**base, "status": "Failed",
                 "error": "MetaTrader5 package missing. pip install MetaTrader5"}
@@ -193,7 +199,7 @@ def execute_trade(risk_payload: dict, stub_mode: bool = False, settings: dict = 
         return {**base, "status": "Failed",
                 "error": "Could not connect to MT5 terminal. Is it open and logged in?"}
 
-    receipt = {**base, "target_ticker": ticker, "side": side_str}
+    receipt: dict[str, Any] = {**base, "target_ticker": ticker, "side": side_str}
 
     try:
         # 1. Auto-discover the broker-specific symbol
@@ -252,7 +258,7 @@ def execute_trade(risk_payload: dict, stub_mode: bool = False, settings: dict = 
         last_error_desc = ""
 
         for filling in fillings:
-            request = {
+            request: dict[str, Any] = {
                 "action":       mt5.TRADE_ACTION_DEAL,
                 "symbol":       symbol,
                 "volume":       qty_normalized,
@@ -308,7 +314,7 @@ def execute_trade(risk_payload: dict, stub_mode: bool = False, settings: dict = 
 
 # ── Standalone test ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    mock_risk = {
+    mock_risk: dict[str, Any] = {
         "target_ticker": "NQ",
         "action": "Buy",
         "execution_parameters": {

@@ -1,8 +1,12 @@
 import os
+import sys
 import json
 import threading
 import time as time_module
 from contextlib import asynccontextmanager
+
+if __package__ is None:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles

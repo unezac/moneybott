@@ -19,10 +19,9 @@ Install dependencies:
 import json
 import logging
 import re
-import time
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 # ─── Environment Control ───────────────────────────────────────────────────
 # Force offline mode for HuggingFace to avoid background connection threads
@@ -43,7 +42,7 @@ logger = logging.getLogger(__name__)
 # SCRAPING LAYER  (Playwright async → sync wrapper)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def scrape_economic_calendar(max_events: int = 30) -> list[dict]:
+def scrape_economic_calendar(max_events: int = 30) -> list[dict[str, Any]]:
     """
     Scrape high-impact events from Investing.com's economic calendar.
 
@@ -56,7 +55,6 @@ def scrape_economic_calendar(max_events: int = 30) -> list[dict]:
         {event, actual, forecast, previous, currency, impact, time_utc}
     """
     try:
-        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
         return _scrape_with_playwright(max_events)
     except ImportError:
         logger.warning("Playwright not installed — using fallback mock data.")
@@ -66,7 +64,7 @@ def scrape_economic_calendar(max_events: int = 30) -> list[dict]:
     return _mock_economic_data()
 
 
-def _scrape_with_playwright(max_events: int) -> list[dict]:
+def _scrape_with_playwright(max_events: int) -> list[dict[str, Any]]:
     """Internal: drive Chromium headlessly to pull the calendar table."""
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -104,7 +102,7 @@ def _scrape_with_playwright(max_events: int) -> list[dict]:
             logger.info("Could not apply importance filter — proceeding with all events.")
 
         # Parse table rows
-        events: list[dict] = []
+        events: list[dict[str, Any]] = []
         rows = page.query_selector_all("tr.js-event-item")
 
         for row in rows[:max_events]:
@@ -139,7 +137,7 @@ def _scrape_with_playwright(max_events: int) -> list[dict]:
         return events
 
 
-def _safe_inner_text(element, selector: str) -> str:
+def _safe_inner_text(element: Any, selector: str) -> str:
     """Return inner text or '' if the selector is absent."""
     node = element.query_selector(selector)
     return node.inner_text() if node else ""
@@ -150,7 +148,7 @@ def _normalise_impact(raw: Optional[str]) -> str:
     return mapping.get(raw or "", "low")
 
 
-def _mock_economic_data() -> list[dict]:
+def _mock_economic_data() -> list[dict[str, Any]]:
     """Curated mock events used as fallback or for unit testing."""
     return [
         {"event": "US CPI (YoY)",             "currency": "USD", "actual": "3.4%", "forecast": "3.5%", "previous": "3.7%", "impact": "high",   "time_utc": "13:30"},
@@ -233,7 +231,7 @@ def _keyword_sentiment(text: str) -> tuple[str, float]:
     return "Neutral", 0.50
 
 
-def classify_headline(text: str, model) -> tuple[str, float]:
+def classify_headline(text: str, model: Any) -> tuple[str, float]:
     """
     Return (sentiment_label, confidence_score) for a text snippet.
     FinBERT labels: 'positive' → Bullish, 'negative' → Bearish, 'neutral' → Neutral
@@ -273,7 +271,7 @@ _LOWER_IS_BETTER = {
 }
 
 
-def score_actual_vs_forecast(event: dict) -> dict:
+def score_actual_vs_forecast(event: dict[str, Any]) -> dict[str, Any]:
     """
     Quantify the market surprise from actual vs forecast data.
 
@@ -320,7 +318,7 @@ def score_actual_vs_forecast(event: dict) -> dict:
 # AGGREGATE MACRO SENTIMENT
 # ═══════════════════════════════════════════════════════════════════════════
 
-def aggregate_sentiment(analysed_events: list[dict]) -> dict:
+def aggregate_sentiment(analysed_events: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Combine per-event NLP sentiment + surprise scores into a macro verdict.
 
@@ -368,14 +366,14 @@ def aggregate_sentiment(analysed_events: list[dict]) -> dict:
 # MAIN RUNNER — produces the Agent 2 JSON payload
 # ═══════════════════════════════════════════════════════════════════════════
 
-def run_fundamental_analysis(max_events: int = 20) -> dict:
+def run_fundamental_analysis(max_events: int = 20) -> dict[str, Any]:
     """
     Full pipeline: scrape → NLP → score → aggregate → return JSON dict.
     """
     events = scrape_economic_calendar(max_events=max_events)
     model  = load_sentiment_model()
 
-    analysed: list[dict] = []
+    analysed: list[dict[str, Any]] = []
     for ev in events:
         headline = ev["event"]
         # Enrich headline with surprise context for better NLP
@@ -409,7 +407,7 @@ def run_fundamental_analysis(max_events: int = 20) -> dict:
              except:
                  pass
 
-    payload = {
+    payload: dict[str, Any] = {
         "agent":             "fundamental_analyst",
         "timestamp_utc":     datetime.now(tz=timezone.utc).isoformat(),
         "macro_sentiment":   macro["label"],

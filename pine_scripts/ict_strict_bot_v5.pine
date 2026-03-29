@@ -1,0 +1,115 @@
+//@version=5
+strategy("ICT Strict Bot v5", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+
+// === Inputs ===
+use_killzone = input(true, "Use ICT Killzone")
+london_start = input.time(timestamp("1970-01-01T07:00:00Z"), "London Killzone Start UTC")
+london_end   = input.time(timestamp("1970-01-01T10:00:00Z"), "London Killzone End UTC")
+ny_start     = input.time(timestamp("1970-01-01T12:00:00Z"), "New York Killzone Start UTC")
+ny_end       = input.time(timestamp("1970-01-01T15:00:00Z"), "New York Killzone End UTC")
+lookback     = input.int(12, "Sweep / Structure Lookback")
+ob_lookback  = input.int(8, "Order Block Lookback")
+fvg_lookback = input.int(8, "FVG Lookback")
+rr_ratio     = input.float(2.0, "Min Risk Reward", step=0.1)
+atr_len      = input.int(14, "ATR Length")
+trail_start  = input.float(1.0, "Trail at 1:1 RR")
+
+// === Utilities ===
+var float last_entry_price = na
+var bool trade_open = false
+
+in_killzone = false
+if use_killzone
+    t = time("UTC")
+    h = hour(t)
+    in_killzone := (h >= 7 and h < 10) or (h >= 12 and h < 15)
+else
+    in_killzone := true
+
+// === Market structure helpers ===
+get_swing_high(offset) => ta.highest(high, offset)
+get_swing_low(offset) => ta.lowest(low, offset)
+
+is_sweep_buy(i) =>
+    prev_high = ta.highest(high, i)
+    high > prev_high and close < prev_high
+
+is_sweep_sell(i) =>
+    prev_low = ta.lowest(low, i)
+    low < prev_low and close > prev_low
+
+is_fvg_bull(i) =>
+    i >= 2 and high[i - 1] < low and low > high[i - 2]
+
+is_fvg_bear(i) =>
+    i >= 2 and low[i - 1] > high and high < low[i - 2]
+
+is_ob_bull(i) =>
+    close[i] < open[i] and close > open and close - open > open[i] - close[i]
+
+is_ob_bear(i) =>
+    close[i] > open[i] and close < open and open - close > close[i] - open[i]
+
+mss_bull(i) =>
+    high > ta.highest(high, lookback)
+
+mss_bear(i) =>
+    low < ta.lowest(low, lookback)
+
+// === Entry logic ===
+entry_long = false
+entry_short = false
+sl_price = na
+tp_price = na
+
+fvg_bull_low = na
+fvg_bull_high = na
+fvg_bear_low = na
+fvg_bear_high = na
+
+if is_fvg_bull(2)
+    fvg_bull_low := high[2]
+    fvg_bull_high := low
+if is_fvg_bear(2)
+    fvg_bear_low := high
+    fvg_bear_high := low[2]
+
+if in_killzone
+    if is_sweep_sell(1) and mss_bull(0)
+        if not na(fvg_bull_low) and low <= fvg_bull_high and high >= fvg_bull_low
+            entry_long := true
+            sl_price := fvg_bull_low - syminfo.mintick * 2
+    if is_sweep_buy(1) and mss_bear(0)
+        if not na(fvg_bear_high) and high >= fvg_bear_low and low <= fvg_bear_high
+            entry_short := true
+            sl_price := fvg_bear_high + syminfo.mintick * 2
+
+atr = ta.atr(atr_len)
+
+if entry_long
+    risk = math.abs(close - sl_price)
+    tp_price := close + math.max(risk * rr_ratio, atr * rr_ratio)
+    strategy.entry("ICT Long", strategy.long)
+    strategy.exit("Exit Long", "ICT Long", stop=sl_price, limit=tp_price)
+    trade_open := true
+    last_entry_price := close
+
+if entry_short
+    risk = math.abs(close - sl_price)
+    tp_price := close - math.max(risk * rr_ratio, atr * rr_ratio)
+    strategy.entry("ICT Short", strategy.short)
+    strategy.exit("Exit Short", "ICT Short", stop=sl_price, limit=tp_price)
+    trade_open := true
+    last_entry_price := close
+
+// === Trailing stop ===
+if trade_open and strategy.position_size != 0
+    current_rr = strategy.position_avg_price != 0 ?
+        (strategy.position_size > 0 ? (close - strategy.position_avg_price) / math.abs(strategy.position_avg_price - sl_price) : (strategy.position_avg_price - close) / math.abs(strategy.position_avg_price - sl_price))
+        : na
+    if not na(current_rr) and current_rr >= trail_start
+        strategy.exit("Trail", from_entry=(strategy.position_size > 0 ? "ICT Long" : "ICT Short"), stop=strategy.position_avg_price)
+
+plotshape(entry_long, title="Long Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(entry_short, title="Short Entry", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plotshape(in_killzone, title="Killzone", style=shape.circle, location=location.top, color=color.yellow, size=size.tiny)
