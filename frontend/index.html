@@ -368,6 +368,23 @@ tr:hover td { background:rgba(255,255,255,.02); }
     </div>
   </div>
 
+  <!-- ── BACKEND STATUS ── -->
+  <div class="panel fade-in" id="backend-panel">
+    <div class="ph">
+      <div class="ph-title"><span class="ph-dot pur"></span>Backend Dashboard</div>
+      <span class="ph-pill" id="backend-last-event">No events yet</span>
+    </div>
+    <div class="exec-grid" style="grid-template-columns:repeat(2,1fr); gap:14px; padding:16px;">
+      <div class="ec"><label>Auto Trade</label><span id="bk-auto">OFF</span></div>
+      <div class="ec"><label>Pending Trade</label><span id="bk-pending">No</span></div>
+      <div class="ec"><label>Stub Mode</label><span id="bk-stub">—</span></div>
+      <div class="ec"><label>Event Count</label><span id="bk-event-count">0</span></div>
+    </div>
+    <div class="log-box" id="backend-log-box" style="margin:0 16px 16px; overflow-y:auto; max-height:220px;">
+      <div class="log-line"><span class="log-ts">—</span><span class="log-ag">backend</span><span class="log-msg">Waiting for backend activity...</span></div>
+    </div>
+  </div>
+
   <!-- ── AGENT STATUS ── -->
   <div class="panel fade-in">
     <div class="ph"><div class="ph-title"><span class="ph-dot green"></span>Agent Architecture Status</div></div>
@@ -406,6 +423,9 @@ async function loadMode(){
   }catch(e){ /* ignore */ }
 }
 loadMode();
+loadBackendStatus();
+loadBackendLogs();
+setInterval(() => { loadBackendStatus(); loadBackendLogs(); }, 12000);
 
 async function updateRR(val){
   try {
@@ -462,6 +482,48 @@ function renderLogs(){
   $('log-count').textContent = LOGS.length+' entries';
 }
 function addLog(ag, msg){ LOGS.push({ts:ts(),ag,msg}); renderLogs(); }
+
+function renderBackendLogs(entries){
+  const box = $('backend-log-box');
+  if(!entries || !entries.length){
+    box.innerHTML = '<div class="log-line"><span class="log-ts">—</span><span class="log-ag">backend</span><span class="log-msg">Waiting for backend activity...</span></div>';
+    return;
+  }
+  box.innerHTML = entries.slice(-16).reverse().map(l=>{
+    const tsVal = l.timestamp_utc ? l.timestamp_utc.slice(11,19) : '—';
+    return `<div class="log-line"><span class="log-ts">${tsVal}</span><span class="log-ag">${l.source}</span><span class="log-msg">${l.message}</span></div>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function loadBackendStatus(){
+  try{
+    const res = await fetch('/api/backend_status');
+    if(!res.ok) return;
+    const data = await res.json();
+    $('bk-auto').textContent = data.auto_trade_active ? 'ON' : 'OFF';
+    $('bk-pending').textContent = data.pending_trade ? 'Yes' : 'No';
+    const stubMode = data.stub_mode === true || String(data.stub_mode).toLowerCase() === 'true';
+    $('bk-stub').textContent = stubMode ? 'STUB' : 'LIVE';
+    $('bk-event-count').textContent = data.backend_event_count || 0;
+    const latest = data.last_backend_event;
+    if(latest){
+      $('backend-last-event').textContent = `${latest.timestamp_utc.slice(11,19)} ${latest.source}: ${latest.message}`;
+    } else {
+      $('backend-last-event').textContent = 'No events yet';
+    }
+  }catch(e){ /* ignore */ }
+}
+
+async function loadBackendLogs(){
+  try{
+    const res = await fetch('/api/backend_logs');
+    if(!res.ok) return;
+    const logs = await res.json();
+    renderBackendLogs(logs);
+  }catch(e){ /* ignore */ }
+}
+
 renderLogs();
 
 // ── CHART ─────────────────────────────────────────────────────────────────

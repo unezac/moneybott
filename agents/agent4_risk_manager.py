@@ -13,6 +13,7 @@ It ensures that:
 
 import logging
 from datetime import datetime, timedelta
+from typing import Optional, Any
 import MetaTrader5 as mt5
 
 # Logging configuration
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # ─── 1. DYNAMIC POSITION SIZING (LOT CALCULATION) ──────────────────────────
 
-def calculate_lot_size(symbol: str, stop_loss_distance: float, risk_percentage: float = 1.0) -> float:
+def calculate_lot_size(symbol: str, stop_loss_distance: float, risk_percentage: float = 1.0, account_info: Optional[Any] = None) -> float:
     """
     Calculates the exact lot size based on account balance and risk percentage.
     If SL is hit, the loss will equal exactly risk_percentage of the account.
@@ -30,7 +31,8 @@ def calculate_lot_size(symbol: str, stop_loss_distance: float, risk_percentage: 
         logger.error(f"Invalid SL distance: {stop_loss_distance}")
         return 0.0
 
-    account_info = mt5.account_info()
+    if account_info is None:
+        account_info = mt5.account_info()
     symbol_info = mt5.symbol_info(symbol)
     
     if account_info is None or symbol_info is None:
@@ -47,6 +49,7 @@ def calculate_lot_size(symbol: str, stop_loss_distance: float, risk_percentage: 
         logger.error(f"Zero tick value/size for {symbol}.")
         return 0.0
 
+    # lot_size = risk_amount / (sl_dist * tick_value / tick_size)
     raw_lot = risk_amount / (stop_loss_distance * (tick_value / tick_size))
     
     vol_min = symbol_info.volume_min
@@ -61,7 +64,7 @@ def calculate_lot_size(symbol: str, stop_loss_distance: float, risk_percentage: 
 
 # ─── 2. DAILY DRAWDOWN LIMIT (KILL SWITCH) ───────────────────────────────
 
-def check_daily_drawdown(max_daily_loss_pct: float = 3.0, max_consecutive_losses: int = 3) -> bool:
+def check_daily_drawdown(max_daily_loss_pct: float = 3.0, max_consecutive_losses: int = 3, account_info: Optional[Any] = None) -> bool:
     """
     Checks if the account has exceeded the daily loss limit or consecutive loss limit.
     """
@@ -72,7 +75,8 @@ def check_daily_drawdown(max_daily_loss_pct: float = 3.0, max_consecutive_losses
     if history_deals is None:
         return True
 
-    account_info = mt5.account_info()
+    if not account_info:
+        account_info = mt5.account_info()
     if not account_info:
         return False
 
@@ -97,6 +101,21 @@ def check_daily_drawdown(max_daily_loss_pct: float = 3.0, max_consecutive_losses
         logger.error(f"KILL SWITCH: Max Consecutive Losses ({consecutive_losses})")
         return False
 
+    return True
+
+# ─── 2.1 GLOBAL EQUITY PROTECTOR ──────────────────────────────────────────
+
+def check_equity_protection(max_drawdown_pct: float = 10.0) -> bool:
+    """
+    Hard kill switch based on total account drawdown from all-time high or initial balance.
+    """
+    acc = mt5.account_info()
+    if not acc: return False
+    
+    # Simple check: if equity is 10% below balance, close all
+    if acc.equity < acc.balance * (1 - (max_drawdown_pct / 100.0)):
+        logger.critical(f"EQUITY PROTECTION TRIGGERED: Equity {acc.equity} is too low vs Balance {acc.balance}")
+        return False
     return True
 
 # ─── 3. SPREAD & SLIPPAGE FILTER ──────────────────────────────────────────
@@ -163,10 +182,20 @@ def run_risk_manager(ml_result: dict, target_ticker: str = "NAS100", stub_mode: 
     settings = settings or {}
     decision = ml_result.get("decision", "Hold")
     
+    # Pre-fetch account info once to reuse
+    account_info = None
     if not stub_mode:
+        account_info = mt5.account_info()
+        
+        # 1. Global Equity Protection
+        if not check_equity_protection(max_drawdown_pct=float(settings.get("max_drawdown_pct", 10.0))):
+             return {"status": "Blocked", "reason": "Global Equity Protection Triggered"}
+
+        # 2. Daily Drawdown Check
         if not check_daily_drawdown(
             max_daily_loss_pct=float(settings.get("max_daily_loss", 3.0)),
-            max_consecutive_losses=int(settings.get("max_consecutive_losses", 3))
+            max_consecutive_losses=int(settings.get("max_consecutive_losses", 3)),
+            account_info=account_info
         ):
             return {"status": "Blocked", "reason": "Daily Drawdown/Loss limit reached"}
 
@@ -175,8 +204,16 @@ def run_risk_manager(ml_result: dict, target_ticker: str = "NAS100", stub_mode: 
             return {"status": "Blocked", "reason": f"Spread too high on {target_ticker}"}
 
     # ── 4. DYNAMIC SL/TP & LOT SIZING ──────────────────────────────────────
-    sl_distance = ml_result.get("sl_distance", 100.0) 
-    tp_distance = ml_result.get("tp_distance", sl_distance * 2.0)
+    # Prefer ATR-based SL if available from ML result
+    atr_val = ml_result.get("features_used", {}).get("atr_val", 0.0)
+    
+    if atr_val > 0:
+        sl_distance = atr_val * float(settings.get("atr_multiplier_sl", 2.0))
+        tp_distance = atr_val * float(settings.get("atr_multiplier_tp", 4.0))
+    else:
+        sl_distance = ml_result.get("sl_distance", 100.0) 
+        tp_distance = ml_result.get("tp_distance", sl_distance * 2.0)
+        
     risk_pct = float(settings.get("risk_per_trade", 1.0))
     
     lot_size = 0.0
@@ -194,8 +231,6 @@ def run_risk_manager(ml_result: dict, target_ticker: str = "NAS100", stub_mode: 
             
             # If stub or no tick, use price from tech_payload
             if current_price == 0:
-                from agents.agent1_technical_analyst import run_technical_analysis # For type hints/context if needed
-                # Actually, tech_payload summary is in ml_result
                 current_price = ml_result.get("agent1_summary", {}).get("current_price", 0.0)
 
             if current_price > 0:
@@ -206,7 +241,7 @@ def run_risk_manager(ml_result: dict, target_ticker: str = "NAS100", stub_mode: 
                     stop_loss = current_price + sl_distance
                     take_profit = current_price - tp_distance
 
-            lot_size = calculate_lot_size(target_ticker, sl_distance, risk_pct)
+            lot_size = calculate_lot_size(target_ticker, sl_distance, risk_pct, account_info=account_info)
         except Exception as e:
             return {"status": "Blocked", "reason": f"Risk calculation error: {e}"}
 
@@ -215,7 +250,7 @@ def run_risk_manager(ml_result: dict, target_ticker: str = "NAS100", stub_mode: 
         "decision": decision,
         "action": decision,
         "target_ticker": target_ticker,
-        "atr_used": ml_result.get("features_used", {}).get("atr_val", 0.0),
+        "atr_used": atr_val,
         "execution_parameters": {
             "status": "Executable" if decision != "Hold" else "No Trade",
             "symbol": target_ticker,
@@ -225,6 +260,6 @@ def run_risk_manager(ml_result: dict, target_ticker: str = "NAS100", stub_mode: 
             "tp_distance": tp_distance,
             "stop_loss": round(stop_loss, 2),
             "take_profit": round(take_profit, 2),
-            "risk_amount_usd": 0.0 # Will be filled by agent5 or shown in UI
+            "risk_amount_usd": round(account_info.balance * (risk_pct / 100.0), 2) if account_info else 0.0
         }
     }

@@ -49,6 +49,9 @@ SCALER_PATH= os.path.join(MODEL_DIR, "feature_scaler.joblib")
 
 PROBABILITY_THRESHOLD = 0.70   # minimum confidence to issue Buy/Sell
 
+# ── Global Cache ────────────────────────────────────────────────────────────
+_MODEL_CACHE = None
+_SCALER_CACHE = None
 
 # ═══════════════════════════════════════════════════════════════════════════
 # FEATURE ENGINEERING
@@ -317,13 +320,20 @@ def train_model(
 
 def load_or_train_model(use_xgboost: bool = False) -> tuple:
     """Load persisted model/scaler or train from scratch if not found."""
+    global _MODEL_CACHE, _SCALER_CACHE
+    
+    if _MODEL_CACHE is not None and _SCALER_CACHE is not None:
+        return _MODEL_CACHE, _SCALER_CACHE
+
     if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
         logger.info("Loading existing model from %s", MODEL_DIR)
-        model  = joblib.load(MODEL_PATH)
-        scaler = joblib.load(SCALER_PATH)
-        return model, scaler
+        _MODEL_CACHE = joblib.load(MODEL_PATH)
+        _SCALER_CACHE = joblib.load(SCALER_PATH)
+        return _MODEL_CACHE, _SCALER_CACHE
+        
     logger.info("No saved model found — training …")
-    return train_model(use_xgboost=use_xgboost)
+    _MODEL_CACHE, _SCALER_CACHE = train_model(use_xgboost=use_xgboost)
+    return _MODEL_CACHE, _SCALER_CACHE
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -407,26 +417,31 @@ def predict_trade(
         rationale = f"Confidence {best_prob*100:.1f}% below {threshold*100:.0f}% threshold ({session_lbl})."
 
     # ── Dynamic SL/TP Calculation (ATR-based) ─────────────────────────────
-    # SL = 1.5x ATR (Standard)
+    # SL/TP calculation is now delegated to Agent 4 (Risk Manager)
+    # But we provide standard multipliers here as guidance.
     atr = tech_payload.get("atr_val", 0.0)
-    sl_dist = atr * 1.5 if atr > 0 else 100.0
     
-    # TP = SL * RR (Bot/User defined)
+    # Guidance values
     try:
         rr = float(settings.get("risk_reward_ratio", 2.0))
     except:
         rr = 2.0
-    tp_dist = sl_dist * rr
+        
+    sl_mult = float(settings.get("atr_multiplier_sl", 1.5))
+    tp_mult = sl_mult * rr
 
     return {
         "decision":      decision,
         "probability":   float(best_prob),
         "class_probs":   {LABEL_MAP[c]: float(p) for c, p in zip(classes, proba)},
-        "features_used": features,
+        "features_used": {
+            **features,
+            "atr_val": atr
+        },
         "threshold":     threshold,
         "rationale":     rationale,
-        "sl_distance":   round(sl_dist, 2),
-        "tp_distance":   round(tp_dist, 2),
+        "sl_distance":   round(atr * sl_mult, 2) if atr > 0 else 100.0,
+        "tp_distance":   round(atr * tp_mult, 2) if atr > 0 else 200.0,
     }
 
 

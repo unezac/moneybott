@@ -16,6 +16,7 @@ Install dependencies:
 =============================================================================
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -39,10 +40,10 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SCRAPING LAYER  (Playwright async → sync wrapper)
+# SCRAPING LAYER  (Playwright async)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def scrape_economic_calendar(max_events: int = 30) -> list[dict[str, Any]]:
+async def scrape_economic_calendar(max_events: int = 30) -> list[dict[str, Any]]:
     """
     Scrape high-impact events from Investing.com's economic calendar.
 
@@ -55,7 +56,7 @@ def scrape_economic_calendar(max_events: int = 30) -> list[dict[str, Any]]:
         {event, actual, forecast, previous, currency, impact, time_utc}
     """
     try:
-        return _scrape_with_playwright(max_events)
+        return await _scrape_with_playwright(max_events)
     except ImportError:
         logger.warning("Playwright not installed — using fallback mock data.")
     except Exception as exc:
@@ -64,15 +65,15 @@ def scrape_economic_calendar(max_events: int = 30) -> list[dict[str, Any]]:
     return _mock_economic_data()
 
 
-def _scrape_with_playwright(max_events: int) -> list[dict[str, Any]]:
+async def _scrape_with_playwright(max_events: int) -> list[dict[str, Any]]:
     """Internal: drive Chromium headlessly to pull the calendar table."""
-    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
     url = "https://www.investing.com/economic-calendar/"
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context(
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -80,41 +81,42 @@ def _scrape_with_playwright(max_events: int) -> list[dict[str, Any]]:
             ),
             viewport={"width": 1280, "height": 900},
         )
-        page = context.new_page()
+        page = await context.new_page()
         logger.info("Navigating to %s", url)
 
         try:
-            page.goto(url, timeout=30_000, wait_until="domcontentloaded")
+            await page.goto(url, timeout=30_000, wait_until="domcontentloaded")
         except PWTimeout:
+            await browser.close()
             raise RuntimeError("Page load timed out")
 
         # Accept cookie banner if present
         try:
-            page.click("#onetrust-accept-btn-handler", timeout=5_000)
+            await page.click("#onetrust-accept-btn-handler", timeout=5_000)
         except Exception:
             pass
 
         # Filter to high-impact events only
         try:
-            page.click("a[data-filter-importance='3']", timeout=8_000)
-            page.wait_for_timeout(2_000)
+            await page.click("a[data-filter-importance='3']", timeout=8_000)
+            await asyncio.sleep(2)
         except Exception:
             logger.info("Could not apply importance filter — proceeding with all events.")
 
         # Parse table rows
         events: list[dict[str, Any]] = []
-        rows = page.query_selector_all("tr.js-event-item")
+        rows = await page.query_selector_all("tr.js-event-item")
 
         for row in rows[:max_events]:
             try:
-                event_name = _safe_inner_text(row, "td.event a")
-                currency   = _safe_inner_text(row, "td.flagCur .ceFlags")
-                actual     = _safe_inner_text(row, "td.bold.act")
-                forecast   = _safe_inner_text(row, "td.fore")
-                previous   = _safe_inner_text(row, "td.prev")
-                impact_cls = row.query_selector("td.sentiment")
-                impact_lvl = impact_cls.get_attribute("data-img_key") if impact_cls else "low"
-                time_cell  = _safe_inner_text(row, "td.time")
+                event_name = await _safe_inner_text(row, "td.event a")
+                currency   = await _safe_inner_text(row, "td.flagCur .ceFlags")
+                actual     = await _safe_inner_text(row, "td.bold.act")
+                forecast   = await _safe_inner_text(row, "td.fore")
+                previous   = await _safe_inner_text(row, "td.prev")
+                impact_cls = await row.query_selector("td.sentiment")
+                impact_lvl = await impact_cls.get_attribute("data-img_key") if impact_cls else "low"
+                time_cell  = await _safe_inner_text(row, "td.time")
 
                 if not event_name:
                     continue
@@ -132,15 +134,17 @@ def _scrape_with_playwright(max_events: int) -> list[dict[str, Any]]:
                 logger.debug("Row parse error: %s", row_exc)
                 continue
 
-        browser.close()
+        await browser.close()
         logger.info("Scraped %d economic events", len(events))
         return events
 
 
-def _safe_inner_text(element: Any, selector: str) -> str:
+async def _safe_inner_text(element: Any, selector: str) -> str:
     """Return inner text or '' if the selector is absent."""
-    node = element.query_selector(selector)
-    return node.inner_text() if node else ""
+    node = await element.query_selector(selector)
+    if node:
+        return await node.inner_text()
+    return ""
 
 
 def _normalise_impact(raw: Optional[str]) -> str:
@@ -366,11 +370,11 @@ def aggregate_sentiment(analysed_events: list[dict[str, Any]]) -> dict[str, Any]
 # MAIN RUNNER — produces the Agent 2 JSON payload
 # ═══════════════════════════════════════════════════════════════════════════
 
-def run_fundamental_analysis(max_events: int = 20) -> dict[str, Any]:
+async def run_fundamental_analysis(max_events: int = 20) -> dict[str, Any]:
     """
     Full pipeline: scrape → NLP → score → aggregate → return JSON dict.
     """
-    events = scrape_economic_calendar(max_events=max_events)
+    events = await scrape_economic_calendar(max_events=max_events)
     model  = load_sentiment_model()
 
     analysed: list[dict[str, Any]] = []
@@ -423,5 +427,5 @@ def run_fundamental_analysis(max_events: int = 20) -> dict[str, Any]:
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    result = run_fundamental_analysis()
+    result = asyncio.run(run_fundamental_analysis())
     print(json.dumps(result, indent=2, default=str))

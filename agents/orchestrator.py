@@ -10,6 +10,7 @@ STEP D: Conditional Execution (Auto/Manual Toggle)
 =============================================================================
 """
 
+import asyncio
 import time
 import logging
 import json
@@ -27,10 +28,19 @@ from backend.database import get_settings, save_run
 
 # ─── CONFIGURATION ──────────────────────────────────────────────────────────
 LOOP_INTERVAL = 60  # Check every 60 seconds
-AUTO_TRADING_ENABLED = True  # Global Toggle
+DEFAULT_SYMBOLS = ["NAS100", "XAUUSD", "GBPJPY"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("Orchestrator")
+
+async def async_run_technical_analysis(ticker, settings):
+    """Wrapper to run Technical Analyst asynchronously."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, run_technical_analysis, ticker, settings)
+
+async def async_run_fundamental_analysis():
+    """Wrapper to run Fundamental Analyst asynchronously."""
+    return await run_fundamental_analysis()
 
 def is_market_gate_open(ticker: str) -> bool:
     """STEP A: Checks if market conditions (Session & Volume) are suitable."""
@@ -39,11 +49,18 @@ def is_market_gate_open(ticker: str) -> bool:
     # 1. Session Check (London/NY Overlap: 12:00 - 16:00 UTC is prime)
     # Broad high-liquidity window: 08:00 - 20:00 UTC
     if not (8 <= now_utc <= 20):
-        logger.info(f"WAIT: Market conditions unsuitable (Outside active sessions: {now_utc}:00 UTC)")
+        logger.info(f"WAIT: Market conditions unsuitable for {ticker} (Outside active sessions: {now_utc}:00 UTC)")
         return False
 
     # 2. Volume Check
     tick = mt5.symbol_info_tick(ticker)
+    if not tick:
+        # Try to discover symbol first
+        from agents.mt5_data import discover_symbol
+        resolved = discover_symbol(ticker)
+        if resolved:
+            tick = mt5.symbol_info_tick(resolved)
+    
     if not tick:
         logger.warning(f"WAIT: Could not fetch tick data for {ticker}")
         return False
@@ -59,104 +76,116 @@ def send_telegram_alert(message: str):
     """Placeholder for Telegram alert functionality."""
     logger.info(f"📢 TELEGRAM ALERT: {message}")
 
-def run_strict_pipeline():
-    """Main loop enforcing the Bank-Style sequential pipeline."""
-    logger.info("Starting Strict Pipeline Orchestrator...")
+async def process_symbol(ticker, settings):
+    """Process a single symbol through the pipeline."""
+    try:
+        # ─── STEP A: MARKET GATE ────────────────────────────────────────
+        if not is_market_gate_open(ticker):
+            return
+
+        logger.info(f"--- Starting New Analysis Cycle for {ticker} ---")
+
+        # ─── STEP B: DEEP ANALYSIS (THE BRAINS) ─────────────────────────
+        # Run Technical and Fundamental Analysts IN PARALLEL
+        logger.info(f"[B] Running Analysts in Parallel for {ticker}...")
+        tech_task = async_run_technical_analysis(ticker, settings)
+        fund_task = async_run_fundamental_analysis()
+        
+        tech_payload, fund_payload = await asyncio.gather(tech_task, fund_task)
+        
+        # 3. ML Boss Decision
+        logger.info(f"[B3] Consulting ML Manager for {ticker}...")
+        ml_result = run_ml_decision(
+            tech_payload=tech_payload,
+            fund_payload=fund_payload,
+            threshold=float(settings.get("threshold", 0.70))
+        )
+        
+        decision = ml_result.get("decision", "Hold")
+        style = "SCALP" if ml_result.get("probability", 0) < 0.85 else "SWING"
+        
+        if decision == "Hold":
+            logger.info(f"Pipeline Result for {ticker}: WAIT (ML confidence too low or no signal)")
+            return
+
+        logger.info(f"🚀 SIGNAL DETECTED for {ticker}: {decision} ({style}) | Confidence: {ml_result.get('probability', 0)*100:.1f}%")
+
+        # ─── STEP C: RISK MANAGEMENT (THE SHIELD) ───────────────────────
+        logger.info(f"[C] Running Risk Manager for {ticker}...")
+        ml_result["trade_style"] = style 
+        
+        risk_result = run_risk_manager(
+            ml_result, 
+            target_ticker=ticker, 
+            stub_mode=False, 
+            settings=settings
+        )
+        
+        if risk_result.get("status") == "Blocked":
+            logger.warning(f"❌ TRADE BLOCKED for {ticker} by Risk Manager: {risk_result.get('reason')}")
+            return
+
+        # ─── STEP D: EXECUTION (THE HANDS) ──────────────────────────────
+        auto_trade = settings.get("auto_trade", "false").lower() == "true"
+        if not auto_trade:
+            msg = f"MANUAL SIGNAL: {decision} {ticker} ({style}) | SL: {risk_result['execution_parameters']['sl_distance']} pts"
+            logger.info(f"📝 {msg}")
+            send_telegram_alert(msg)
+        else:
+            logger.info(f"[D] Executing Trade for {ticker} via Agent 5...")
+            execution_receipt = execute_trade(risk_result, stub_mode=False, settings=settings)
+            
+            # Log Result
+            master_result = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ticker": ticker,
+                "style": style,
+                "technical": tech_payload,
+                "fundamental": fund_payload,
+                "ml_decision": ml_result,
+                "risk_management": risk_result,
+                "execution_receipt": execution_receipt
+            }
+            save_run(master_result)
+            logger.info(f"✅ EXECUTION COMPLETE for {ticker}: Status={execution_receipt.get('status')}")
+
+    except Exception as e:
+        logger.error(f"Error processing {ticker}: {e}", exc_info=True)
+
+async def run_strict_pipeline():
+    """Main loop enforcing the Bank-Style sequential pipeline for multiple symbols."""
+    logger.info("Starting Multi-Symbol Async Strict Pipeline Orchestrator...")
     
-    if not mt5.initialize():
+    from agents.mt5_data import ensure_mt5_connected
+    if not ensure_mt5_connected():
         logger.error("Failed to initialize MT5")
         return
 
     while True:
+        start_time = time.time()
         try:
             # Refresh settings from DB
             settings = get_settings()
-            ticker = settings.get("scalp_ticker", "NAS100")
+            symbols = settings.get("symbols", DEFAULT_SYMBOLS)
+            if isinstance(symbols, str):
+                symbols = [s.strip() for s in symbols.split(",")]
             
-            # ─── STEP A: MARKET GATE ────────────────────────────────────────
-            if not is_market_gate_open(ticker):
-                time.sleep(LOOP_INTERVAL)
-                continue
+            # Process all symbols in parallel
+            tasks = [process_symbol(symbol, settings) for symbol in symbols]
+            await asyncio.gather(*tasks)
 
-            logger.info(f"--- Starting New Analysis Cycle for {ticker} ---")
-
-            # ─── STEP B: DEEP ANALYSIS (THE BRAINS) ─────────────────────────
-            # 1. Technical Analysis
-            logger.info("[B1] Running Technical Analyst (Agent 1)...")
-            tech_payload = run_technical_analysis(ticker=ticker, settings=settings)
-            
-            # 2. Fundamental Analysis
-            logger.info("[B2] Running Fundamental Analyst (Agent 2)...")
-            fund_payload = run_fundamental_analysis()
-            
-            # 3. ML Boss Decision
-            logger.info("[B3] Consulting ML Manager (Agent 3)...")
-            ml_result = run_ml_decision(
-                tech_payload=tech_payload,
-                fund_payload=fund_payload,
-                threshold=float(settings.get("threshold", 0.70))
-            )
-            
-            decision = ml_result.get("decision", "Hold")
-            # Determine style based on ML confidence or timeframes (Simplified)
-            style = "SCALP" if ml_result.get("probability", 0) < 0.85 else "SWING"
-            
-            if decision == "Hold":
-                logger.info(f"Pipeline Result: WAIT (ML confidence too low or no signal)")
-                time.sleep(LOOP_INTERVAL)
-                continue
-
-            logger.info(f"🚀 SIGNAL DETECTED: {decision} ({style}) | Confidence: {ml_result.get('probability', 0)*100:.1f}%")
-
-            # ─── STEP C: RISK MANAGEMENT (THE SHIELD) ───────────────────────
-            logger.info("[C] Running Risk Manager (Agent 4)...")
-            # Add style info to ml_result for risk manager to see
-            ml_result["trade_style"] = style 
-            
-            risk_result = run_risk_manager(
-                ml_result, 
-                target_ticker=ticker, 
-                stub_mode=False, 
-                settings=settings
-            )
-            
-            if risk_result.get("status") == "Blocked":
-                logger.warning(f"❌ TRADE BLOCKED by Risk Manager: {risk_result.get('reason')}")
-                time.sleep(LOOP_INTERVAL)
-                continue
-
-            # ─── STEP D: EXECUTION (THE HANDS) ──────────────────────────────
-            if not AUTO_TRADING_ENABLED:
-                msg = f"MANUAL SIGNAL: {decision} {ticker} ({style}) | SL: {risk_result['execution_parameters']['sl_distance']} pts"
-                logger.info(f"📝 {msg}")
-                send_telegram_alert(msg)
-            else:
-                logger.info("[D] Executing Trade via Agent 5...")
-                execution_receipt = execute_trade(risk_result, stub_mode=False, settings=settings)
-                
-                # Log Result
-                master_result = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "ticker": ticker,
-                    "style": style,
-                    "technical": tech_payload,
-                    "fundamental": fund_payload,
-                    "ml_decision": ml_result,
-                    "risk_management": risk_result,
-                    "execution_receipt": execution_receipt
-                }
-                save_run(master_result)
-                logger.info(f"✅ EXECUTION COMPLETE: Status={execution_receipt.get('status')}")
-
-            # Cooldown after trade attempt
-            time.sleep(LOOP_INTERVAL * 5)
+            # Cooldown after cycle
+            elapsed = time.time() - start_time
+            logger.info(f"Full Cycle completed in {elapsed:.2f}s")
+            wait_time = max(0, LOOP_INTERVAL - elapsed)
+            await asyncio.sleep(wait_time)
 
         except Exception as e:
             logger.error(f"PIPELINE CRASHED: {e}", exc_info=True)
             logger.info("Aborting current cycle and restarting loop...")
-            time.sleep(LOOP_INTERVAL)
+            await asyncio.sleep(LOOP_INTERVAL)
 
     mt5.shutdown()
 
 if __name__ == "__main__":
-    run_strict_pipeline()
+    asyncio.run(run_strict_pipeline())

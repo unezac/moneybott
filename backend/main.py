@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import json
@@ -12,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timezone
 
 from backend.database import init_db, get_settings, update_settings, save_run, get_history
 from backend.models import SettingsUpdate
@@ -19,6 +21,21 @@ from backend.models import SettingsUpdate
 # Global state for manual authorization
 last_pending_risk_result = None
 auto_trade_active = False
+backend_events: list[dict] = []
+backend_events_lock = threading.Lock()
+
+def log_backend_event(source: str, message: str, level: str = "info"):
+    event = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "level": level,
+        "message": message,
+    }
+    with backend_events_lock:
+        backend_events.append(event)
+        if len(backend_events) > 200:
+            backend_events.pop(0)
+
 
 def initialize_auto_trade():
     global auto_trade_active
@@ -32,8 +49,11 @@ async def lifespan(app: FastAPI):
     # Startup logic
     init_db()
     initialize_auto_trade()
-    # Start the background auto-trade thread
-    threading.Thread(target=auto_trade_loop, daemon=True).start()
+    
+    # Start the async orchestrator in the background
+    from agents.orchestrator import run_strict_pipeline
+    asyncio.create_task(run_strict_pipeline())
+    
     yield
     # Shutdown logic (if any)
 
@@ -84,12 +104,34 @@ def api_get_settings():
 def api_update_settings(settings: SettingsUpdate):
     update_data = {k: v for k, v in settings.dict(exclude_unset=True).items() if v is not None}
     update_settings(update_data)
+    log_backend_event("settings", f"Settings updated: {json.dumps(update_data)}")
     return {"status": "success", "settings": get_settings()}
+
+@app.get("/api/backend_status")
+def api_get_backend_status():
+    settings = get_settings()
+    return {
+        "auto_trade_active": auto_trade_active,
+        "pending_trade": last_pending_risk_result is not None,
+        "pending_trade_summary": {
+            "action": last_pending_risk_result.get("action"),
+            "status": last_pending_risk_result.get("execution_parameters", {}).get("status")
+        } if last_pending_risk_result else None,
+        "stub_mode": settings.get("stub_mode", "false"),
+        "last_backend_event": backend_events[-1] if backend_events else None,
+        "backend_event_count": len(backend_events),
+    }
+
+@app.get("/api/backend_logs")
+def api_get_backend_logs(limit: int = 50):
+    with backend_events_lock:
+        return backend_events[-limit:]
 
 @app.post("/api/execute_manual")
 def api_execute_manual():
     global last_pending_risk_result
     if not last_pending_risk_result:
+        log_backend_event("execution", "Manual authorization requested but no pending trade.", "warn")
         return {"error": "No pending trade found to authorize", "status": "Error"}
     
     from agents.agent5_execution import execute_trade
@@ -98,10 +140,13 @@ def api_execute_manual():
     is_stub = raw_stub is True or str(raw_stub).lower() == "true"
     
     try:
+        log_backend_event("execution", "Manual execution started.")
         final_receipt = execute_trade(last_pending_risk_result, stub_mode=is_stub, settings=settings)
         last_pending_risk_result = None # Clear after execution
+        log_backend_event("execution", f"Manual execution completed: {final_receipt.get('status')}")
         return final_receipt
     except Exception as e:
+        log_backend_event("execution", f"Manual execution failed: {e}", "error")
         return {"error": str(e), "status": "Error"}
 
 @app.get("/api/mt5_status")
@@ -254,6 +299,7 @@ def _run_analysis_pipeline(ticker_key="scalp_ticker"):
 def api_analyse():
     try:
         global last_pending_risk_result
+        log_backend_event("orchestrator", "Analysis pipeline started.")
         result = _run_analysis_pipeline()
         
         # Cache for manual execution
@@ -271,14 +317,16 @@ def api_analyse():
                 "status": "No Trade",
                 "reason": "Market conditions do not meet criteria."
             }
-        
+        log_backend_event("orchestrator", f"Analysis complete. Pending trade: {last_pending_risk_result is not None}")
         return result
     except Exception as e:
+        log_backend_event("orchestrator", f"Analysis failed: {e}", "error")
         return {"error": str(e), "status": "Internal Server Error"}
 
 @app.post("/api/run")
 def api_run_bot():
     """Manual execution of the last analysed trade."""
+    log_backend_event("execution", "Manual run endpoint triggered.")
     global last_pending_risk_result
     if not last_pending_risk_result:
         return {"error": "No pending trade found. Run Analyse first.", "status": "Error"}
@@ -303,70 +351,20 @@ def api_run_bot():
         last_pending_risk_result = None # Clear after execution
         return final_receipt
     except Exception as e:
+        log_backend_event("execution", f"Run endpoint failed: {e}", "error")
         return {"error": str(e), "status": "Error"}
-
-def auto_trade_loop():
-    global auto_trade_active
-    while True:
-        if auto_trade_active:
-            try:
-                print("🤖 Auto-trade: Running scheduled pipeline...")
-                from agents.agent5_execution import execute_trade
-                settings = get_settings()
-                raw_stub = settings.get("stub_mode", "false")
-                is_stub = raw_stub is True or str(raw_stub).lower() == "true"
-
-                # 1. Analyse
-                analysis = _run_analysis_pipeline()
-                risk_result = analysis["risk_management"]
-                ticker = risk_result.get("target_ticker", "NQ")
-
-                # 2. Check if we already have an open position for this ticker
-                # to avoid duplicate trades in auto-mode
-                import MetaTrader5 as mt5
-                from agents.agent5_execution import connect_mt5, disconnect_mt5
-                from agents.mt5_data import discover_symbol
-                
-                can_trade = False
-                if is_stub:
-                    can_trade = True # In simulation, we always allow trade
-                elif connect_mt5(settings):
-                    # Resolve the broker-specific symbol for position checking
-                    resolved_symbol = discover_symbol(ticker)
-                    if not resolved_symbol:
-                        resolved_symbol = ticker # Fallback to original
-
-                    positions = mt5.positions_get(symbol=resolved_symbol)
-                    if not positions:
-                        can_trade = True
-                    else:
-                        print(f"🤖 Auto-trade: Position already open for {resolved_symbol} ({ticker}). Skipping.")
-                    disconnect_mt5()
-
-                # 3. Execute if valid and no open position
-                if can_trade and risk_result.get("action") in ("Buy", "Sell") and \
-                   risk_result.get("execution_parameters", {}).get("status") == "Executable":
-                    final_receipt = execute_trade(risk_result, stub_mode=is_stub, settings=settings)
-                    analysis["execution_receipt"] = final_receipt
-                    analysis["type"] = "auto_trade"
-                    save_run(analysis)
-                    print(f"🤖 Auto-trade: Executed {risk_result.get('action')}")
-                else:
-                    print("🤖 Auto-trade: No valid setup found.")
-
-            except Exception as e:
-                print(f"🤖 Auto-trade Error: {e}")
-        time_module.sleep(60) # Run every 1 minute for better responsiveness
 
 @app.post("/api/auto_trade/toggle")
 def toggle_auto_trade():
     global auto_trade_active
     auto_trade_active = not auto_trade_active
     update_settings({"auto_trade": "true" if auto_trade_active else "false"})
+    log_backend_event("auto_trade", f"Auto-trade {'enabled' if auto_trade_active else 'disabled'}.")
     return {"active": auto_trade_active}
 
 @app.get("/api/auto_trade/status")
 def get_auto_trade_status():
+    global auto_trade_active
     return {"active": auto_trade_active}
 
 if __name__ == "__main__":

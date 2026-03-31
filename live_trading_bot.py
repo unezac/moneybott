@@ -85,15 +85,24 @@ def make_dashboard_layout():
 
 # ─── MAIN BOT LOOP ──────────────────────────────────────────────────────────
 def run_bot():
-    if not mt5.initialize():
-        console.print("[red]Failed to initialize MT5[/red]")
-        return
+    from agents.mt5_data import ensure_mt5_connected
+    
+    # Get credentials from DB settings
+    db_path = os.path.join("data", "bot_manager.db")
+    settings = {}
+    if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+            c.execute("SELECT key, value FROM settings")
+            settings = {row[0]: row[1] for row in c.fetchall()}
+            conn.close()
+        except:
+            pass
 
-    creds = get_mt5_credentials()
-    if creds and creds['account'] != 0:
-        if not mt5.login(creds['account'], password=creds['password'], server=creds['server']):
-            console.print(f"[red]Login failed: {mt5.last_error()}[/red]")
-            return
+    if not ensure_mt5_connected(settings):
+        console.print("[red]Failed to initialize/login MT5[/red]")
+        return
     
     bot_data = {sym: {"bid": 0, "ask": 0, "volume": 0, "atr": 0, "status": "Initializing"} for sym in SYMBOLS}
     layout = make_dashboard_layout()

@@ -541,11 +541,11 @@ def run_technical_analysis(
     4. 15m -> Scan for setups (PD Arrays) matching the higher bias.
     """
     import MetaTrader5 as mt5
-    from agents.agent5_execution import connect_mt5, disconnect_mt5
+    from agents.mt5_data import ensure_mt5_connected
 
-    # 1. Connect MT5 once to fetch multiple timeframes instantly
+    # 1. Ensure MT5 is connected
     settings = settings or {}
-    mt5_active = connect_mt5(settings)
+    mt5_active = ensure_mt5_connected(settings)
     if not mt5_active:
         logger.warning("Agent 1: Could not connect MT5 for MTF analysis. Rates will fall back to yfinance (delayed).")
 
@@ -564,9 +564,6 @@ def run_technical_analysis(
         except Exception as e:
             logger.warning("Failed to fetch %s for %s: %s", tf, ticker, e)
             biases[tf] = "neutral"
-
-    if mt5_active:
-         disconnect_mt5()
 
     # 2. Setup Scanning on standard lower interval (e.g., 15m or 1H)
     # We use 15m for refinement as requested by the user

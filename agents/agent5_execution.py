@@ -45,48 +45,15 @@ except ImportError:
 # MT5 CONNECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_mt5_credentials(settings: Optional[dict[str, Any]] = None) -> tuple[int, str, str]:
-    settings = settings or {}
-    try:
-        account = int(settings.get("mt5_account") or os.getenv("MT5_ACCOUNT", "0"))
-    except (ValueError, TypeError):
-        account = 0
-    password = settings.get("mt5_password") or os.getenv("MT5_PASSWORD", "")
-    server   = settings.get("mt5_server")   or os.getenv("MT5_SERVER",   "")
-    return account, password, server
-
-
 def connect_mt5(settings: Optional[dict[str, Any]] = None) -> bool:
-    if not mt5_available:
-        return False
-
-    account, password, server = _get_mt5_credentials(settings)
-    if account == 0:
-        logger.error("MT5 account number not configured. Set it in Settings → mt5_account.")
-        return False
-
-    if not mt5.initialize():
-        logger.error("MT5 terminal not running or initialize() failed: %s", mt5.last_error())
-        return False
-
-    if not mt5.login(account, password=password, server=server):
-        logger.error("MT5 login failed for account %s on %s: %s", account, server, mt5.last_error())
-        mt5.shutdown()
-        return False
-
-    info = mt5.account_info()
-    if info:
-        logger.info("MT5 Connected — Account: %s | Server: %s | Balance: %.2f %s",
-                    info.login, info.server, info.balance, info.currency)
-    return True
+    from agents.mt5_data import ensure_mt5_connected
+    return ensure_mt5_connected(settings)
 
 
 def disconnect_mt5():
-    if mt5_available:
-        try:
-            mt5.shutdown()
-        except Exception:
-            pass
+    # We now prefer to keep MT5 initialized for the session
+    # but provide a way to shutdown if needed.
+    pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════

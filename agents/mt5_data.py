@@ -11,12 +11,72 @@ Handles:
 """
 
 import logging
+import time
 from typing import Any, Optional
 from datetime import datetime, timezone
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# ── Global MT5 State ────────────────────────────────────────────────────────
+_MT5_INITIALIZED = False
+
+def ensure_mt5_connected(settings: Optional[dict] = None) -> bool:
+    """
+    Ensure MT5 is initialized and logged in. 
+    Returns True if connection is active.
+    """
+    global _MT5_INITIALIZED
+    
+    if not _mt5_available():
+        return False
+        
+    import MetaTrader5 as mt5
+    
+    # Check if already initialized
+    if _MT5_INITIALIZED and mt5.terminal_info() is not None:
+        return True
+        
+    # Attempt initialization
+    if not mt5.initialize():
+        logger.error(f"MT5 Initialize failed: {mt5.last_error()}")
+        return False
+        
+    # Handle Login if credentials provided
+    if settings:
+        account = int(settings.get("mt5_account", 0))
+        password = settings.get("mt5_password", "")
+        server = settings.get("mt5_server", "")
+        
+        if account > 0:
+            if not mt5.login(account, password=password, server=server):
+                logger.error(f"MT5 Login failed for {account}: {mt5.last_error()}")
+                return False
+            logger.info(f"MT5 Logged in successfully: {account}")
+
+    _MT5_INITIALIZED = True
+    return True
+
+def get_account_info() -> Optional[dict]:
+    """Fetch current account status (balance, equity, margin)."""
+    if not ensure_mt5_connected():
+        return None
+        
+    import MetaTrader5 as mt5
+    acc = mt5.account_info()
+    if acc is None:
+        return None
+        
+    return {
+        "balance": acc.balance,
+        "equity": acc.equity,
+        "margin_free": acc.margin_free,
+        "margin_level": acc.margin_level,
+        "leverage": acc.leverage,
+        "currency": acc.currency,
+        "profit": acc.profit
+    }
 
 # ── Known broker symbol aliases (extend as needed) ────────────────────────────
 # Keys are canonical names, values are ordered lists to try
