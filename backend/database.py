@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "bot_manager.db")
 
@@ -75,7 +76,8 @@ def save_run(run_data: dict):
     risk_mgmt = run_data.get("risk_management", {})
     exec_rcpt = run_data.get("execution_receipt", {})
     
-    timestamp = ml_decision.get("timestamp_utc", "")
+    # Try multiple sources for timestamp
+    timestamp = run_data.get("timestamp") or ml_decision.get("timestamp_utc") or datetime.now(timezone.utc).isoformat()
     decision = ml_decision.get("decision", "Hold")
     prob = ml_decision.get("win_probability", 0.0)
     pos_size = risk_mgmt.get("execution_parameters", {}).get("position_size_shares", 0.0)

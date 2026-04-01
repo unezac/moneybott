@@ -37,9 +37,9 @@ def get_mt5_credentials():
         settings = {row[0]: row[1] for row in c.fetchall()}
         conn.close()
         return {
-            "account": int(settings.get('mt5_account', 0)),
-            "password": settings.get('mt5_password', ''),
-            "server": settings.get('mt5_server', '')
+            "account": int(settings.get('mt5_account', 1301106881)),
+            "password": settings.get('mt5_password', 'Selmani@!1'),
+            "server": settings.get('mt5_server', 'XMGlobal-MT5 6')
         }
     except:
         return None

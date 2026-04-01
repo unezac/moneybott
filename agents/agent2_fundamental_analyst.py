@@ -171,14 +171,14 @@ def _mock_economic_data() -> list[dict[str, Any]]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ── Priority keywords that override model output ─────────────────────────
-_HAWKISH_KEYWORDS = {
+_HAWKISH_KEYWORDS = [
     "rate hike", "tightening", "hawkish", "inflation above target",
     "rate increase", "quantitative tightening", "qt",
-}
-_DOVISH_KEYWORDS = {
+]
+_DOVISH_KEYWORDS = [
     "rate cut", "easing", "dovish", "pause", "pivot",
     "below target", "quantitative easing", "qe", "layoffs",
-}
+]
 
 
 def load_sentiment_model():
@@ -347,7 +347,7 @@ def aggregate_sentiment(analysed_events: list[dict[str, Any]]) -> dict[str, Any]
         sentiment_votes[ev["nlp_sentiment"]] += w
 
     if total_weight == 0:
-        return {"label": "Neutral", "score": 0.0, "confidence": 0.0}
+        return {"label": "Neutral", "score": 0.0, "confidence": 0.0, "vote_breakdown": sentiment_votes}
 
     normalised = round(total_score / total_weight, 4)  # [-1, +1]
 

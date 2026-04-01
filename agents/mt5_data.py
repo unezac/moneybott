@@ -45,9 +45,9 @@ def ensure_mt5_connected(settings: Optional[dict] = None) -> bool:
         
     # Handle Login if credentials provided
     if settings:
-        account = int(settings.get("mt5_account", 0))
-        password = settings.get("mt5_password", "")
-        server = settings.get("mt5_server", "")
+        account = int(settings.get("mt5_account", 1301106881))
+        password = settings.get("mt5_password", "Selmani@!1")
+        server = settings.get("mt5_server", "XMGlobal-MT5 6")
         
         if account > 0:
             if not mt5.login(account, password=password, server=server):
@@ -84,21 +84,24 @@ SYMBOL_ALIASES: dict[str, list[str]] = {
     "NAS100": [
         "NAS100", "NAS100.cash", "NAS100m", "USTEC", "US100",
         "nas100", "Nas100", "NQ100", "Nasdaq100", "NDX100",
-        "NASAQ", "NASUSD", "US100Cash", "US100Index",
+        "NASAQ", "NASUSD", "US100Cash", "US100Index", "USTECH", "USTECH.cash"
+    ],
+    "US100": [
+        "US100Cash", "US100.cash", "NAS100", "USTECH", "USTECH.cash", "US100m", "NQ100"
     ],
     "US500": [
         "US500", "US500.cash", "US500m", "SP500", "SPX500",
-        "US500USD", "USA500",
+        "US500USD", "USA500", "US500Cash"
     ],
     "US30": [
         "US30", "US30.cash", "US30m", "DJ30", "DJIA",
-        "USA30",
+        "USA30", "US30Cash"
     ],
     "XAUUSD": [
-        "XAUUSD", "GOLD", "XAUUSDm", "XAUUSD.cash",
+        "XAUUSD", "GOLD", "XAUUSDm", "XAUUSD.cash", "XAUUSD.spot", "GOLD.cash"
     ],
     "USOIL": [
-        "USOIL", "OIL", "XTIUSD", "WTI", "CL",
+        "USOIL", "OIL", "XTIUSD", "WTI", "CL", "USOIL.cash"
     ],
 }
 
