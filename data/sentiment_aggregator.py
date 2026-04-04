@@ -1,6 +1,7 @@
 import logging
 import os
 import requests
+import threading
 import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
@@ -24,8 +25,11 @@ except ImportError:
 
 try:
     from transformers import pipeline # type: ignore
+    from transformers.utils import logging as transformers_logging # type: ignore
+    transformers_logging.set_verbosity_error()
 except ImportError:
     pipeline = None
+    transformers_logging = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SentimentAggregator")
@@ -33,25 +37,43 @@ logger = logging.getLogger("SentimentAggregator")
 class SentimentAggregator:
     _instance = None
     _model = None
+    _lock = threading.Lock()
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super(SentimentAggregator, cls).__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(SentimentAggregator, cls).__new__(cls)
         return cls._instance
 
     def __init__(self):
-        # NLP Model (FinBERT) is stored at class level
-        pass
+        # NLP Model (FinBERT) is stored at class level.
+        self.hf_token = os.getenv("HF_TOKEN", HF_TOKEN)
+        if self.hf_token:
+            os.environ.setdefault("HF_TOKEN", self.hf_token)
+            os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", self.hf_token)
+
+        self.reddit_client_id = os.getenv("REDDIT_CLIENT_ID", REDDIT_CLIENT_ID)
+        self.reddit_client_secret = os.getenv("REDDIT_CLIENT_SECRET", REDDIT_CLIENT_SECRET)
+        self.reddit_user_agent = os.getenv("REDDIT_USER_AGENT", REDDIT_USER_AGENT)
+
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+        logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
     def _init_model(self):
         """Lazily initialize the sentiment model once and reuse it."""
         if SentimentAggregator._model is None and pipeline:
-            try:
-                logger.info("Loading FinBERT model (this may take a few moments)... ")
-                SentimentAggregator._model = pipeline("text-classification", model="ProsusAI/finbert")
-                logger.info("FinBERT model loaded successfully.")
-            except Exception as e:
-                logger.error(f"Failed to load FinBERT model: {e}")
+            with SentimentAggregator._lock:
+                if SentimentAggregator._model is None:
+                    try:
+                        logger.info("Loading FinBERT model (this may take a few moments)... ")
+                        pipeline_kwargs = {"model": "ProsusAI/finbert"}
+                        if self.hf_token:
+                            pipeline_kwargs["token"] = self.hf_token
+                        SentimentAggregator._model = pipeline("text-classification", **pipeline_kwargs)
+                        logger.info("FinBERT model loaded successfully.")
+                    except Exception as e:
+                        logger.error(f"Failed to load FinBERT model: {e}")
         return SentimentAggregator._model
 
     def scrape_twitter(self, query="EURUSD", count=10):
@@ -71,15 +93,19 @@ class SentimentAggregator:
 
     def scrape_reddit(self, query="EURUSD", subreddit_name="Forex", limit=10):
         """Scrape market sentiment from Reddit."""
-        if not praw or not REDDIT_CLIENT_ID:
-            logger.warning("Reddit API keys not set or praw not installed")
+        if not praw:
+            logger.warning("praw is not installed; Reddit scraping is disabled")
+            return []
+
+        if not self.reddit_client_id or not self.reddit_client_secret or not self.reddit_user_agent:
+            logger.warning("Reddit API keys are missing; set REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT")
             return []
             
         try:
             reddit = praw.Reddit(
-                client_id=REDDIT_CLIENT_ID,
-                client_secret=REDDIT_CLIENT_SECRET,
-                user_agent=REDDIT_USER_AGENT
+                client_id=self.reddit_client_id,
+                client_secret=self.reddit_client_secret,
+                user_agent=self.reddit_user_agent
             )
             subreddit = reddit.subreddit(subreddit_name)
             posts = subreddit.hot(limit=limit)

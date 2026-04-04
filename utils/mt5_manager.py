@@ -153,6 +153,34 @@ class MT5Manager:
                 total_risk += risk
         return total_risk
 
+    def get_recent_loss_streak(self, lookback: int = 10):
+        """Return the consecutive count of losing closed trades from most recent history."""
+        if not self.connected and not self.connect():
+            return 0
+
+        from datetime import datetime, timedelta
+
+        now = datetime.now()
+        start = now - timedelta(days=14)
+        history_deals = mt5.history_deals_get(start, now)
+        if not history_deals:
+            return 0
+
+        trade_deals = [
+            deal
+            for deal in history_deals
+            if deal.type in [mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL]
+        ]
+        trade_deals.sort(key=lambda deal: deal.time, reverse=True)
+
+        streak = 0
+        for deal in trade_deals[:lookback]:
+            if deal.profit < 0:
+                streak += 1
+            elif deal.profit > 0:
+                break
+        return streak
+
     def get_account_info(self):
         if not self.connected and not self.connect():
             return None
@@ -323,6 +351,60 @@ class MT5Manager:
             
         logger.info(f"Order SUCCESS: {symbol} {volume} lots at {exec_price}")
         return result
+
+    def place_pending_order(self, symbol, order_type, price, sl, tp, volume, comment="ZeroLossBot"):
+        """Place a pending limit order for precise ICT entries."""
+        if not self.connected and not self.connect():
+            return None
+
+        symbol_info = mt5.symbol_info(symbol)
+        tick = mt5.symbol_info_tick(symbol)
+        if not symbol_info or not tick:
+            return None
+
+        market_price = tick.ask if order_type == mt5.ORDER_TYPE_BUY_LIMIT else tick.bid
+        if order_type == mt5.ORDER_TYPE_BUY_LIMIT and price >= market_price:
+            logger.error(f"Buy limit price must stay below market price for {symbol}")
+            return None
+        if order_type == mt5.ORDER_TYPE_SELL_LIMIT and price <= market_price:
+            logger.error(f"Sell limit price must stay above market price for {symbol}")
+            return None
+
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": float(volume),
+            "type": order_type,
+            "price": float(price),
+            "sl": float(sl),
+            "tp": float(tp),
+            "deviation": 20,
+            "magic": 123456,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_RETURN,
+        }
+        result = mt5.order_send(request)
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Pending order SUCCESS: {symbol} {volume} lots at {price}")
+            return result
+        if result:
+            logger.error(f"Pending order REJECTED for {symbol}: Code {result.retcode} ({result.comment})")
+        return None
+
+    def execute_trade(self, symbol, decision, lot, sl, tp, entry_price=None, comment="ICTExecution"):
+        """Compatibility wrapper for market and limit execution styles."""
+        decision_upper = str(decision or "").upper()
+        if "BUY LIMIT" in decision_upper:
+            return self.place_pending_order(symbol, mt5.ORDER_TYPE_BUY_LIMIT, entry_price, sl, tp, lot, comment=comment)
+        if "SELL LIMIT" in decision_upper:
+            return self.place_pending_order(symbol, mt5.ORDER_TYPE_SELL_LIMIT, entry_price, sl, tp, lot, comment=comment)
+        if "BUY" in decision_upper:
+            return self.place_order(symbol, mt5.ORDER_TYPE_BUY, entry_price, sl, tp, lot, comment=comment)
+        if "SELL" in decision_upper:
+            return self.place_order(symbol, mt5.ORDER_TYPE_SELL, entry_price, sl, tp, lot, comment=comment)
+        logger.info(f"No executable decision for {symbol}: {decision}")
+        return None
 
     def close_all_positions(self, comment="Global Equity Protection"):
         """Closes all open positions immediately."""

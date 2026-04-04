@@ -16,3 +16,12 @@ class SettingsUpdate(BaseModel):
     scalp_max_trades: Optional[str] = None
     scalp_ticker: Optional[str] = None
     risk_reward_ratio: Optional[str] = None
+
+
+class CryptoBacktestRequest(BaseModel):
+    years: Optional[int] = 2
+    refresh_cache: Optional[bool] = False
+
+
+class CryptoPaperScanRequest(BaseModel):
+    variant: Optional[str] = None

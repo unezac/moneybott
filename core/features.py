@@ -157,6 +157,7 @@ class ICTFeatures:
         # Based on recent swing high/low
         recent_high = self.df['high'].tail(50).max()
         recent_low = self.df['low'].tail(50).min()
+        range_size = recent_high - recent_low
         equilibrium = (recent_high + recent_low) / 2
         
         current_price = self.df['close'].iloc[-1]
@@ -164,8 +165,15 @@ class ICTFeatures:
         return {
             'high': recent_high,
             'low': recent_low,
+            'range': range_size,
             'equilibrium': equilibrium,
-            'current_zone': zone
+            'current_zone': zone,
+            'fib_62_buy': recent_high - (range_size * 0.62),
+            'fib_70_5_buy': recent_high - (range_size * 0.705),
+            'fib_79_buy': recent_high - (range_size * 0.79),
+            'fib_62_sell': recent_low + (range_size * 0.62),
+            'fib_70_5_sell': recent_low + (range_size * 0.705),
+            'fib_79_sell': recent_low + (range_size * 0.79),
         }
 
     def calculate_atr(self, period=14):
@@ -300,7 +308,7 @@ class ICTFeatures:
             'sweep_count_ssl': len([s for s in sweeps if s['type'] == 'SSL']),
             'ms_trend_bull': 1 if ms and ms[-1]['trend'] == 'Bullish' else 0,
             'ms_trend_bear': 1 if ms and ms[-1]['trend'] == 'Bearish' else 0,
-            'ms_event_choch': 1 if ms and ms[-1]['type'] == 'ChoCH' else 0,
+            'ms_event_choch': 1 if ms and ms[-1]['type'] in {'ChoCH', 'CHOCH'} else 0,
             'ms_event_bos': 1 if ms and ms[-1]['type'] == 'BOS' else 0,
             'in_premium': 1 if pd['current_zone'] == "Premium" else 0,
             'in_discount': 1 if pd['current_zone'] == "Discount" else 0,

@@ -17,6 +17,12 @@ TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 # YouTube Data API v3
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 
+# Hugging Face
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+if HF_TOKEN:
+    os.environ.setdefault("HF_TOKEN", HF_TOKEN)
+    os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", HF_TOKEN)
+
 # Reddit API (PRAW)
 REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")

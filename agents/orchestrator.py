@@ -10,6 +10,7 @@ import MetaTrader5 as mt5
 from data.price_feed import PriceFeed
 from data.sentiment_aggregator import SentimentAggregator
 from core.features import ICTFeatures
+from core.ict_strategy import ICTDecisionEngine
 from models.ensemble import MLEnsemble
 from core.risk_gate import RiskGate
 from utils.mt5_manager import MT5Manager
@@ -70,8 +71,20 @@ async def process_symbol_5layer(ticker, settings):
         ict = ICTFeatures(df_h1)
         kz = ict.get_killzones()
         features = ict.generate_feature_vector()
+        ict_decision = ICTDecisionEngine(df_h1).analyze()
         features['kz_session'] = kz[-1]['session'] if kz else None
         features['sentiment_score'] = sentiment_score
+        features['ict_decision'] = ict_decision
+        features['trade_setup'] = ict_decision.get('trade_setup', {})
+        features['liquidity_sweep_confirmed'] = 1 if ict_decision.get('liquidity_sweep_confirmed') else 0
+        features['structure_shift_confirmed'] = 1 if ict_decision.get('structure_shift_confirmed') else 0
+        features['entry_zone_confirmed'] = 1 if ict_decision.get('entry_zone_confirmed') else 0
+        features['order_block_present'] = 1 if ict_decision.get('order_block_present') else 0
+        features['fvg_present'] = 1 if ict_decision.get('fvg_present') else 0
+        features['candle_confirmation'] = 1 if ict_decision.get('candle_confirmation') else 0
+        features['clear_structure'] = 1 if ict_decision.get('clear_structure') else 0
+        features['low_liquidity'] = 1 if ict_decision.get('low_liquidity') else 0
+        features['volume_ratio'] = ict_decision.get('volume_ratio', 1.0)
         
         # ─── LAYER 3: MACHINE LEARNING ENSEMBLE ──────────────────────────────
         ml_ensemble = MLEnsemble()
@@ -100,13 +113,23 @@ async def process_symbol_5layer(ticker, settings):
         point = info.point
         min_sl_dist = 10 * point 
         sl_dist = max(min_sl_dist, atr * 1.5)
-        tp_dist = sl_dist * 2
-        
-        proposed_params = {
-            "entry": current_price,
-            "sl": current_price - sl_dist if ml_decision == "Buy" else current_price + sl_dist,
-            "tp": current_price + tp_dist if ml_decision == "Buy" else current_price - tp_dist
-        }
+        trade_setup = features.get("trade_setup", {})
+        if trade_setup and trade_setup.get("trade_decision", "HOLD") != "HOLD":
+            proposed_params = {
+                "entry": trade_setup.get("entry_price", current_price),
+                "sl": trade_setup.get("stop_loss"),
+                "tp": trade_setup.get("take_profit_1"),
+                "loss_streak": mt5_mgr.get_recent_loss_streak(),
+            }
+            sl_dist = abs(float(proposed_params["entry"]) - float(proposed_params["sl"])) if proposed_params.get("entry") and proposed_params.get("sl") else sl_dist
+        else:
+            tp_dist = sl_dist * 2
+            proposed_params = {
+                "entry": current_price,
+                "sl": current_price - sl_dist if ml_decision == "Buy" else current_price + sl_dist,
+                "tp": current_price + tp_dist if ml_decision == "Buy" else current_price - tp_dist,
+                "loss_streak": mt5_mgr.get_recent_loss_streak(),
+            }
             
         risk_eval = risk_gate.validate(
             (ml_decision, ml_prob, ml_rationale), 
@@ -130,6 +153,7 @@ async def process_symbol_5layer(ticker, settings):
             "confluence_score": risk_eval.get("confluence_score", 0),
             "proposed_params": proposed_params,
             "risk_eval": risk_eval,
+            "trade_setup": risk_eval.get("trade_setup", trade_setup),
             "sl_dist": sl_dist
         }
 
@@ -146,9 +170,11 @@ async def execute_trade(setup, settings):
         ml_prob = setup["ml_prob"]
         risk_eval = setup["risk_eval"]
         proposed_params = setup["proposed_params"]
+        trade_setup = setup.get("trade_setup", {}) or risk_eval.get("trade_setup", {})
         sl_dist = setup["sl_dist"]
+        execution_decision = risk_eval.get("trade_decision") or trade_setup.get("trade_decision") or ml_decision
 
-        log_event("orchestrator", f"🚀 EXECUTING SIGNAL: {ml_decision} {ticker} (Prob: {ml_prob*100:.1f}%)", "warn")
+        log_event("orchestrator", f"🚀 EXECUTING SIGNAL: {execution_decision} {ticker} (Prob: {ml_prob*100:.1f}%)", "warn")
         
         account_info = mt5_mgr.get_account_info()
         if not account_info:
@@ -162,20 +188,33 @@ async def execute_trade(setup, settings):
         
         risk_amount = account_info.balance * risk_pct
         lots = mt5_mgr.calculate_lot_size(ticker, risk_amount, sl_dist)
+        if lots <= 0:
+            log_event("execution", f"❌ Invalid lot size for {ticker}", "error")
+            return False
         
-        receipt = mt5_mgr.place_order(ticker, order_type= (mt5.ORDER_TYPE_BUY if ml_decision == "Buy" else mt5.ORDER_TYPE_SELL), 
-                                     price=proposed_params['entry'], sl=proposed_params['sl'], tp=proposed_params['tp'], volume=lots)
+        entry_price = trade_setup.get("entry_price", proposed_params['entry'])
+        sl = trade_setup.get("stop_loss", proposed_params['sl'])
+        tp = trade_setup.get("take_profit_2", trade_setup.get("take_profit_1", proposed_params['tp']))
+        receipt = mt5_mgr.execute_trade(
+            ticker,
+            execution_decision,
+            lots,
+            sl,
+            tp,
+            entry_price=entry_price,
+            comment="ICTOrchestrator",
+        )
         
         if receipt:
             master_result = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "ticker": ticker,
-                "ml_decision": {"decision": ml_decision, "win_probability": ml_prob},
+                "ml_decision": {"decision": execution_decision, "win_probability": ml_prob},
                 "risk_management": risk_eval,
-                "execution_receipt": {"status": "Executed", "lots": lots, "price": proposed_params['entry']}
+                "execution_receipt": {"status": "Executed", "lots": lots, "price": entry_price}
             }
             save_run(master_result)
-            log_event("execution", f"✅ Trade Executed: {ml_decision} {lots} lots on {ticker}")
+            log_event("execution", f"✅ Trade Executed: {execution_decision} {lots} lots on {ticker}")
             return True
         else:
             log_event("execution", f"❌ Execution Failed for {ticker}", "error")
@@ -250,7 +289,8 @@ async def run_strict_pipeline():
                         executed_count += 1
                 else:
                     for setup in all_setups:
-                        log_event("orchestrator", f"Manual Signal Pending: {setup['ml_decision']} {setup['ticker']} ({setup['ml_prob']*100:.1f}%)")
+                        pending_decision = (setup.get("trade_setup") or {}).get("trade_decision", setup["ml_decision"])
+                        log_event("orchestrator", f"Manual Signal Pending: {pending_decision} {setup['ticker']} ({setup['ml_prob']*100:.1f}%)")
 
             elapsed = time.time() - start_time
             wait_time = max(0, LOOP_INTERVAL - elapsed)
